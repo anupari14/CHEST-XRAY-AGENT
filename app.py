@@ -2,11 +2,12 @@
 import time
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional
-import os, json
-from typing import Dict, Any
+import os, json , uuid, datetime
+from typing import Dict, Any, Optional
 from openai import OpenAI
 from db.vectors import ingest_pdf_report,vector_search
-from fastapi import Query
+from fastapi import Query, Depends, HTTPException, Header, status, Form
+from fastapi.responses import JSONResponse
 
 
 from starlette.staticfiles import StaticFiles
@@ -228,6 +229,49 @@ from app import ReportPackage  # if split; or paste classes here directly
 app = FastAPI(title="Medical Agent: CXR → Report")
 app.mount("/static", StaticFiles(directory=str(ARTIFACTS_DIR)), name="static")
 
+# ---- Simple Users & Tokens (demo) ----
+# Comma-separated "user:password" pairs (DEMO ONLY; use a real DB in prod)
+RAW_USERS = os.getenv("APP_USERS", "demo:demo").split(",")
+USERS: Dict[str, str] = {}
+for pair in RAW_USERS:
+    pair = pair.strip()
+    if not pair or ":" not in pair:
+        continue
+    u, p = pair.split(":", 1)
+    USERS[u.strip()] = p.strip()
+
+# token store: token -> {"user": str, "exp": unix_epoch}
+TOKENS: Dict[str, Dict[str, float]] = {}
+
+TOKEN_TTL_SECONDS = int(os.getenv("APP_TOKEN_TTL", "7200"))  # 2 hours
+
+
+def _now() -> float:
+    return time.time()
+
+def _new_token(user: str) -> str:
+    t = uuid.uuid4().hex
+    TOKENS[t] = {"user": user, "exp": _now() + TOKEN_TTL_SECONDS}
+    return t
+
+def _check_token(token: str) -> str:
+    rec = TOKENS.get(token)
+    if not rec:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+    if rec["exp"] < _now():
+        TOKENS.pop(token, None)
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
+    return rec["user"]
+
+def auth_required(authorization: Optional[str] = Header(None)) -> str:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing Bearer token")
+    token = authorization.split(None, 1)[1].strip()
+    return _check_token(token)
+
+
+
+
 # ---- YOLO singleton (loads once) ----
 # If you trained in a specific path, set env: export YOLO_MODEL_PATH="/path/to/best.pt"
 # or pass a string to LocalYOLO(...)
@@ -238,14 +282,35 @@ def _to_url(path: Path) -> str:
     rel = path.relative_to(ARTIFACTS_DIR)
     return f"/static/{rel.as_posix()}"
 
-@app.post("/analyze")
+@app.post("/auth/login")
+async def auth_login(username: str = Form(...), password: str = Form(...)):
+    real = USERS.get(username)
+    if not real or real != password:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Bad credentials")
+    tok = _new_token(username)
+    return {
+        "token": tok,
+        "user": username,
+        "expires_in": TOKEN_TTL_SECONDS,
+        "expires_at": int(_now() + TOKEN_TTL_SECONDS),
+    }
+
+@app.post("/auth/logout")
+async def auth_logout(authorization: Optional[str] = Header(None)):
+    if authorization and authorization.lower().startswith("bearer "):
+        tok = authorization.split(None, 1)[1].strip()
+        TOKENS.pop(tok, None)
+    return {"ok": True}
+
+
+@app.post("/analyze",dependencies=[Depends(auth_required)])
 async def analyze(
     file: UploadFile = File(...),
     patient_age: Optional[int] = Form(None),
     patient_sex: Optional[str] = Form(None),
     threshold: float = Form(0.5),
     topk: int = Form(3)  # allow UI to control number of CAMs
-):
+    ):
     # ---- Create per-encounter folder under artifacts/ ----
     encounter_id = f"enc_{int(time.time())}"
     enc_dir = ARTIFACTS_DIR / encounter_id
@@ -337,7 +402,7 @@ async def analyze(
 
 # run: uvicorn app:app --reload
 
-@app.get("/search")
+@app.get("/search", dependencies=[Depends(auth_required)])
 async def search_reports(
     q: str,
     k: int = 5,
