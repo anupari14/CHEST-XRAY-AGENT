@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
+
+# App artifacts
+artifacts/
+uploads/
+*.log
+
+# Data / models (large/binary)
+*.pt
+*.onnx
+*.bin
+*.ckpt
+*.h5
+
+# Local config / secrets
+.env
+.env.*
+*.key
+*.pem
+
+# Streamlit cache
+.streamlit/
