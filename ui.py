@@ -37,9 +37,6 @@ st.markdown("""
 .app-topbar {display:flex; justify-content:space-between; align-items:flex-end; gap:1rem; margin-bottom:4px;}
 .app-title  {font-size: 1.5rem; font-weight: 700; margin: 0;}
 .app-subtle {margin-top:-6px; color:#666; font-size:0.90rem;}
-.navbar {display:flex; gap:.5rem; align-items:center; flex-wrap:wrap;}
-.navbtn {padding:.35rem .75rem; border-radius:10px; border:1px solid rgba(0,0,0,.08); cursor:pointer; font-weight:600; background:#f5f6f8;}
-.navbtn.active {background:white; border-color:rgba(0,0,0,.15); box-shadow:0 1px 3px rgba(0,0,0,.06);}
 .userbox {font-size:.95rem;}
 .userbox .user {font-weight:700;}
 </style>
@@ -72,7 +69,7 @@ if not st.session_state.get("token"):
     st.markdown("""
     <div class="app-topbar">
       <div>
-        <div class="app-title">Medical Agent — Imaging Suite</div>
+        <div class="app-title">🩻 Medical Agent — Imaging Suite</div>
         <div class="app-subtle">AI-generated draft; requires radiologist review. Not for diagnostic use.</div>
       </div>
       <div></div>
@@ -87,20 +84,20 @@ if not st.session_state.get("token"):
         st.rerun()
     st.stop()
 
-# ---------------- Header + Navbar (shown only after login) ----------------
+# ---------------- Header (with navbar + user/Logout) ----------------
 left, mid, right = st.columns([1.4, 2.2, 1])
 with left:
     st.markdown("""
     <div class="app-topbar">
       <div>
-        <div class="app-title">🩻 Medical Agent — Imaging Suite</div>
+        <div class="app-title">Medical Agent — Imaging Suite</div>
         <div class="app-subtle">AI-generated draft; requires radiologist review. Not for diagnostic use.</div>
       </div>
     </div>
     """, unsafe_allow_html=True)
 
 with mid:
-    # Single-row top nav (no duplicates)
+    # Single top nav
     labels = ["Patient Registration", "Chest X-Ray Analysis", "Brain Tumour Detection"]
     key_by_label = {
         "Patient Registration": "patient",
@@ -109,16 +106,8 @@ with mid:
     }
     label_by_key = {v: k for k, v in key_by_label.items()}
     current_idx = labels.index(label_by_key.get(st.session_state.get("page", "cxr"), "Chest X-Ray Analysis"))
-
-    choice = st.radio(
-        "Navigation",
-        labels,
-        index=current_idx,
-        horizontal=True,
-        label_visibility="collapsed",
-    )
+    choice = st.radio("Navigation", labels, index=current_idx, horizontal=True, label_visibility="collapsed")
     st.session_state["page"] = key_by_label[choice]
-
 
 with right:
     c1, c2 = st.columns([2, 1])
@@ -137,66 +126,150 @@ def load_preview_from_bytes(data: bytes) -> Optional[Image.Image]:
     except Exception:
         return None
 
+def _abs_or_static(url_or_path: Optional[str]) -> Optional[str]:
+    if not isinstance(url_or_path, str) or not url_or_path:
+        return None
+    if url_or_path.startswith("/"):
+        return f"{API_URL.rstrip('/')}{url_or_path}"
+    if "artifacts/" in url_or_path:
+        rel = url_or_path.replace("\\", "/").split("artifacts/", 1)[1]
+        return f"{API_URL.rstrip('/')}/static/{rel}"
+    return url_or_path
+
 # ======================================================================
-# PAGE 1: PATIENT REGISTRATION
+# PAGE 1: PATIENT REGISTRATION  (integrated with backend)
 # ======================================================================
 if st.session_state["page"] == "patient":
     st.divider()
     st.header("🧾 Patient Registration")
 
+    # ---------- Create patient ----------
     with st.form("patient_form"):
         colA, colB = st.columns(2)
         with colA:
-            mrn = st.text_input("MRN / Patient ID *")
+            mrn = st.text_input("MRN / Patient ID")
             first = st.text_input("First Name *")
             last = st.text_input("Last Name *")
             sex = st.selectbox("Sex", ["", "M", "F", "Other"])
         with colB:
-            dob = st.date_input("Date of Birth")
+            dob = st.date_input("Date of Birth", format="YYYY-MM-DD")
             phone = st.text_input("Phone")
             email = st.text_input("Email")
-        addr = st.text_area("Address")
+        address = st.text_area("Address")
         notes = st.text_area("Clinical Notes / Indication")
         submitted = st.form_submit_button("Register Patient")
 
     if submitted:
-        payload = {
-            "mrn": mrn, "first": first, "last": last,
-            "sex": sex, "dob": str(dob),
-            "phone": phone, "email": email,
-            "address": addr, "notes": notes,
-        }
-        # If you add a backend route (e.g., POST /patients), this will work; otherwise shows a tip.
-        try:
-            r = requests.post(f"{API_URL}/patients", json=payload, headers=_headers(), timeout=30)
-            if r.status_code >= 400:
-                st.warning("Backend patient API not available; saved locally for now.")
-                raise RuntimeError("No /patients endpoint")
-            r.raise_for_status()
-            st.success("Patient registered.")
-        except Exception:
-            # local fallback: keep one record in session
-            st.session_state.setdefault("patients_local", []).append(payload)
-            st.success("Patient stored locally (demo mode).")
+        if not first.strip() or not last.strip():
+            st.error("First and Last name are required.")
+        else:
+            payload = {
+                "mrn": mrn.strip() or None,
+                "first": first.strip(),
+                "last": last.strip(),
+                "sex": sex if sex else None,
+                "dob": str(dob) if dob else None,
+                "phone": phone.strip() or None,
+                "email": email.strip() or None,
+                "address": address.strip() or None,
+                "notes": notes.strip() or None,
+            }
+            try:
+                r = requests.post(f"{API_URL}/patients", json=payload, headers=_headers(), timeout=30)
+                if r.status_code == 409:
+                    st.warning("A patient with this MRN already exists.")
+                r.raise_for_status()
+                st.success("Patient registered.")
+                st.session_state["__patients_refresh__"] = st.session_state.get("__patients_refresh__", 0) + 1
+            except requests.HTTPError as e:
+                try:
+                    detail = r.json().get("detail")
+                except Exception:
+                    detail = str(e)
+                st.error(f"Create failed: {detail}")
+            except Exception as e:
+                st.error(f"Create failed: {e}")
 
-    # show local list (demo)
-    if st.session_state.get("patients_local"):
-        st.subheader("Recent Patients (local)")
-        dfp = pd.DataFrame(st.session_state["patients_local"])
-        st.dataframe(dfp, use_container_width=True)
+    # ---------- Search & list ----------
+    st.divider()
+    st.subheader("Patients")
+
+    ls1, ls2, ls3 = st.columns([2, 1, 1])
+    with ls1:
+        q = st.text_input("Search", value=st.session_state.get("__patients_q__", ""), placeholder="name / MRN / phone / notes")
+    with ls2:
+        limit = st.number_input("Page size", min_value=5, max_value=100, value=20, step=5)
+    with ls3:
+        if st.button("Refresh"):
+            st.session_state["__patients_refresh__"] = st.session_state.get("__patients_refresh__", 0) + 1
+    st.session_state["__patients_q__"] = q
+
+    # fetch list
+    try:
+        resp_list = requests.get(
+            f"{API_URL}/patients",
+            params={"q": q, "limit": int(limit), "offset": 0},
+            headers=_headers(),
+            timeout=30,
+        )
+        resp_list.raise_for_status()
+        data = resp_list.json()
+        items = data.get("items", [])
+        total = data.get("total", len(items))
+    except Exception as e:
+        items, total = [], 0
+        st.error(f"List failed: {e}")
+
+    # render table with delete actions
+    if items:
+        st.markdown("**Results:** " + str(total))
+        for i, p in enumerate(items, 1):
+            with st.container(border=True):
+                row1 = st.columns([2, 2, 1.2, 1.2, 1.2, 0.8])
+                with row1[0]:
+                    st.markdown(f"**{p.get('first','')} {p.get('last','')}**")
+                    st.caption(f"MRN: {p.get('mrn') or '—'}\nID: {p.get('patient_id') or '—'}")
+                with row1[1]:
+                    st.write(p.get("notes") or "")
+                with row1[2]:
+                    st.caption("Sex / DOB")
+                    st.write(f"{p.get('sex') or '—'} / {p.get('dob') or '—'}")
+                with row1[3]:
+                    st.caption("Phone")
+                    st.write(p.get("phone") or "—")
+                with row1[4]:
+                    st.caption("Email")
+                    st.write(p.get("email") or "—")
+                with row1[5]:
+                    if st.button("🗑️", key=f"del_{p['patient_id']}", help="Delete"):
+                        try:
+                            dr = requests.delete(
+                                f"{API_URL}/patients/{p['patient_id']}",
+                                headers=_headers(),
+                                timeout=20,
+                            )
+                            dr.raise_for_status()
+                            st.success("Deleted.")
+                            st.session_state["__patients_refresh__"] = st.session_state.get("__patients_refresh__", 0) + 1
+                            st.experimental_rerun()
+                        except Exception as e:
+                            st.error(f"Delete failed: {e}")
+    else:
+        st.info("No patients found.")
 
 # ======================================================================
-# PAGE 2: CHEST X-RAY ANALYSIS (existing flow)
+# PAGE 2: CHEST X-RAY ANALYSIS (MRN required + validated; PDF includes images)
 # ======================================================================
 elif st.session_state["page"] == "cxr":
     st.divider()
-    st.header("Chest X-Ray Analysis")
+    st.header("🩻 Chest X-Ray Analysis")
 
     # Controls
     st.subheader("Controls")
     c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
     with c1:
         uploaded = st.file_uploader("Upload Chest X-ray (.png/.jpg/.dcm)", type=["png", "jpg", "jpeg", "dcm"])
+        patient_id = st.text_input("Patient ID (MRN) *", help="Enter a valid patient MRN/ID already registered.")
     with c2:
         thr = st.slider("Prediction threshold", 0.0, 1.0, 0.60, 0.01)
     with c3:
@@ -209,54 +282,119 @@ elif st.session_state["page"] == "cxr":
         if img is not None:
             st.session_state["last_uploaded_preview"] = img
 
-    if run_cxr and uploaded:
-        with st.spinner("Analyzing…"):
-            files = {"file": (uploaded.name, uploaded.getvalue(), uploaded.type or "application/octet-stream")}
-            data = {"threshold": str(thr), "topk": str(topk)}
+    # Validate & Analyze
+    if run_cxr:
+        if not patient_id.strip():
+            st.error("Patient ID (MRN) is required.")
+        elif not uploaded:
+            st.error("Please upload a chest X-ray image.")
+        else:
+            # Validate patient exists
             try:
-                r = requests.post(f"{API_URL}/analyze", files=files, data=data, headers=_headers(), timeout=180)
-                r.raise_for_status()
-                st.session_state["last_response"] = r.json()
-                st.success("Analysis complete.")
-            except Exception as e:
-                st.error(f"Request failed: {e}")
+                rcheck = requests.get(f"{API_URL}/patients/{patient_id.strip()}",
+                                      headers=_headers(), timeout=20)
+                rcheck.raise_for_status()
+            except Exception:
+                st.error("Invalid Patient ID. Please register the patient or check the MRN.")
+            else:
+                with st.spinner("Analyzing…"):
+                    files = {"file": (uploaded.name, uploaded.getvalue(), uploaded.type or "application/octet-stream")}
+                    data = {
+                        "threshold": str(thr),
+                        "topk": str(topk),
+                        "patient_id": patient_id.strip()
+                    }
+                    try:
+                        r = requests.post(f"{API_URL}/analyze", files=files, data=data,
+                                          headers=_headers(), timeout=180)
+                        r.raise_for_status()
+                        st.session_state["last_response"] = r.json()
+                        st.success("Analysis complete.")
+                    except Exception as e:
+                        st.error(f"Request failed: {e}")
 
-    resp = st.session_state.get("last_response") or {}
+    # Normalize response dict safely
+    resp = st.session_state.get("last_response")
+    if not isinstance(resp, dict):
+        resp = {}
 
-    # Row: input image | overlays
-    col_img, col_ov = st.columns([1, 1], vertical_alignment="top")
-    with col_img:
-        st.subheader("Input Image")
-        if st.session_state["last_uploaded_preview"] is not None:
+    # Patient summary + images row
+    # ---- Patient summary & images row (replace this whole section) ----
+    st.divider()
+    pinfo = resp.get("patient") or {}
+    # NEW
+    if pinfo:
+        st.subheader("Patient")
+        full_name = f"{pinfo.get('first','')} {pinfo.get('last','')}".strip() or "—"
+        with st.container(border=True):
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.markdown(f"**MRN**<br/>{pinfo.get('mrn','—')}", unsafe_allow_html=True)
+                st.markdown(f"**Sex**<br/>{pinfo.get('sex','—')}", unsafe_allow_html=True)
+                st.markdown(f"**DOB**<br/>{pinfo.get('dob','—')}", unsafe_allow_html=True)
+            with col2:
+                st.markdown(f"**Patient ID**<br/>{pinfo.get('patient_id','—')}", unsafe_allow_html=True)
+                st.markdown(f"**Name**<br/>{full_name}", unsafe_allow_html=True)
+            with col3:
+                st.markdown(f"**Phone**<br/>{pinfo.get('phone','—')}", unsafe_allow_html=True)
+                st.markdown(f"**Email**<br/>{pinfo.get('email','—')}", unsafe_allow_html=True)
+
+
+    arts = resp.get("artifacts", {}) or {}
+    in_url  = _abs_or_static(arts.get("input_image"))
+    out_url = _abs_or_static(arts.get("output_image"))
+
+    # If backend didn’t set output_image, try first CAM
+    if not out_url:
+        cams = arts.get("cams") or []
+        if cams:
+            out_url = _abs_or_static(cams[0].get("url") or cams[0].get("path"))
+
+    # If overlay accidentally equals input, try to find a different cam
+    if out_url and in_url and out_url == in_url:
+        for cam in (arts.get("cams") or []):
+            cand = _abs_or_static(cam.get("url") or cam.get("path"))
+            if cand and cand != in_url:
+                out_url = cand
+                break
+
+    ci, co = st.columns(2)
+    with ci:
+        st.subheader("Input X-ray")
+        if in_url:
+            st.image(in_url, use_container_width=True)
+        elif st.session_state["last_uploaded_preview"] is not None:
             st.image(st.session_state["last_uploaded_preview"], use_container_width=True)
         else:
             st.info("Upload a chest X-ray above to preview.")
-    with col_ov:
+
+    with co:
         st.subheader("Overlays")
-        arts = resp.get("artifacts", {}) or {}
         cam_list = arts.get("cams") or []
         if cam_list:
             cols = st.columns(3)
-            for i, cam in enumerate(cam_list):
-                url = cam.get("url") or cam.get("path")
-                if isinstance(url, str):
-                    if url.startswith("/"):
-                        abs_url = f"{API_URL.rstrip('/')}{url}"
-                    elif "artifacts/" in url:
-                        rel = url.replace("\\", "/").split("artifacts/", 1)[1]
-                        abs_url = f"{API_URL.rstrip('/')}/static/{rel}"
-                    else:
-                        abs_url = url
-                    cap = f"{cam.get('rank')}. {cam.get('label')} (score={cam.get('score'):.3f})" if cam.get("score") is not None else f"{cam.get('rank')}. {cam.get('label')}"
-                    with cols[i % 3]:
-                        st.image(abs_url, caption=cap, use_container_width=True)
+            for i, cam in enumerate(cam_list[:3]):  # show top-3
+                # Convert backend "/static/..." or relative paths to absolute URLs
+                abs_url = _abs_or_static(cam.get("url") or cam.get("path"))
+                if not abs_url:
+                    continue
+                cap = (
+                    f"{cam.get('rank')}. {cam.get('label')} (score={cam.get('score'):.3f})"
+                    if isinstance(cam.get("score"), (int, float))
+                    else f"{cam.get('rank')}. {cam.get('label')}"
+                )
+                with cols[i % 3]:
+                    st.image(abs_url, caption=cap, use_container_width=True)
         else:
             st.info("No overlays for this analysis.")
+
+
 
     # Report + PDF
     st.divider()
     st.subheader("📝 Draft Report")
-    report = resp.get("report", {}).get("report", {}) or {}
+    report_block = resp.get("report", {}) or {}
+    report = report_block.get("report", {}) or {}
     if report:
         st.markdown(f"**Indication**: {report.get('indication','')}")
         st.markdown(f"**Technique**: {report.get('technique','')}")
@@ -269,11 +407,11 @@ elif st.session_state["page"] == "cxr":
     else:
         st.info("No report yet. Upload an image and click **Analyze**.")
 
-    pdf_val = (resp.get("artifacts", {}) or {}).get("pdf")
+    pdf_val = arts.get("pdf")
     if pdf_val:
         try:
-            if isinstance(pdf_val, str) and pdf_val.startswith("/"):
-                abs_pdf_url = f"{API_URL.rstrip('/')}{pdf_val}"
+            abs_pdf_url = _abs_or_static(pdf_val)
+            if abs_pdf_url and abs_pdf_url.startswith("http"):
                 rr = requests.get(abs_pdf_url, headers=_headers(), timeout=60)
                 rr.raise_for_status()
                 st.download_button("⬇️ Download PDF", data=rr.content, file_name="report.pdf", mime="application/pdf")
@@ -340,7 +478,6 @@ elif st.session_state["page"] == "brain":
     if run_brain and brain_file:
         with st.spinner("Running brain tumour detection…"):
             try:
-                # If you expose a backend route, e.g., POST /brain/infer
                 files = {"file": (brain_file.name, brain_file.getvalue(), brain_file.type or "application/octet-stream")}
                 data = {"threshold": str(b_conf)}
                 r = requests.post(f"{API_URL}/brain/infer", files=files, data=data, headers=_headers(), timeout=180)
@@ -349,11 +486,9 @@ elif st.session_state["page"] == "brain":
                 st.success("Inference complete.")
                 overlay = (out.get("artifact") or {}).get("overlay")
                 if overlay:
-                    if overlay.startswith("/"):
-                        abs_url = f"{API_URL.rstrip('/')}{overlay}"
-                    else:
-                        abs_url = overlay
-                    st.image(abs_url, caption="Detections", use_container_width=True)
+                    abs_url = _abs_or_static(overlay)
+                    if abs_url:
+                        st.image(abs_url, caption="Detections", use_container_width=True)
                 st.subheader("Detections (raw)")
                 st.json(out.get("detections") or out)
             except Exception:

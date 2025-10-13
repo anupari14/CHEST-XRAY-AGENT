@@ -6,6 +6,7 @@ import os, json , uuid, datetime
 from typing import Dict, Any, Optional
 from openai import OpenAI
 from db.vectors import ingest_pdf_report,vector_search
+from utils.pdf_export import export_pdf_with_images
 from fastapi import Query, Depends, HTTPException, Header, status, Form
 from fastapi.responses import JSONResponse
 
@@ -13,9 +14,48 @@ from fastapi.responses import JSONResponse
 from starlette.staticfiles import StaticFiles
 from pathlib import Path
 
-ARTIFACTS_DIR = Path("artifacts")
-ARTIFACTS_DIR.mkdir(exist_ok=True, parents=True)
+ARTIFACTS_DIR = Path(os.getenv("ARTIFACTS_DIR", "artifacts")).resolve()
+ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 
+# ---- Patients: models & storage (JSON-backed) ----
+from pydantic import BaseModel, Field, EmailStr
+from typing import Optional, Dict, Any, List
+import uuid, json
+
+DB_DIR = ARTIFACTS_DIR / "db"
+DB_DIR.mkdir(parents=True, exist_ok=True)
+PAT_DB_PATH = DB_DIR / "patients.json"
+
+class PatientBase(BaseModel):
+    mrn: Optional[str] = Field(None, description="Medical Record Number / external ID")
+    first: str
+    last: str
+    sex: Optional[str] = Field(None, pattern="^(M|F|Other|)$")
+    dob: Optional[str] = None                 # ISO date string (YYYY-MM-DD) for simplicity
+    phone: Optional[str] = None
+    email: Optional[EmailStr] = None
+    address: Optional[str] = None
+    notes: Optional[str] = None
+
+class PatientCreate(PatientBase):
+    first: str
+    last: str
+
+class PatientUpdate(BaseModel):
+    mrn: Optional[str] = None
+    first: Optional[str] = None
+    last: Optional[str] = None
+    sex: Optional[str] = Field(None, pattern="^(M|F|Other|)$")
+    dob: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[EmailStr] = None
+    address: Optional[str] = None
+    notes: Optional[str] = None
+
+class Patient(PatientBase):
+    patient_id: str
+    created_at: float
+    updated_at: float
 
 
 class ReportBody(BaseModel):
@@ -57,7 +97,6 @@ def coerce_report(report):
 
     return out
 
-
 def coerce_codes(codes):
     """Normalize 'codes' to dict: {icd10:[{code,desc}], radlex:[str]}."""
     out = {"icd10": [], "radlex": []}
@@ -92,7 +131,6 @@ def coerce_codes(codes):
             out["radlex"] = [str(r) for r in radlex if r]
     return out
 
-
 def merge_codes(a, b):
     """Merge two codes dicts with de-dupe."""
     out = {"icd10": [], "radlex": []}
@@ -107,7 +145,6 @@ def merge_codes(a, b):
             seen_rad.add(rid)
             out["radlex"].append(rid)
     return out
-
 
 def coerce_flags(flags):
     """Normalize flags into a dict with expected keys."""
@@ -129,7 +166,6 @@ def coerce_flags(flags):
             "follow_up": None
         }
     return base
-
 
 def coerce_disclaimers(disclaimers):
     """Ensure disclaimers is a list of whole strings, not split chars."""
@@ -153,9 +189,6 @@ def coerce_disclaimers(disclaimers):
     s = {i.strip() for i in items if i and i.strip()}
     s.add(MUST)
     return list(s)
-
-
-
 
 def llm_report(findings_payload: dict, prompt_path="prompts/report_prompt.md") -> dict:
     system = open(prompt_path, "r", encoding="utf-8").read()
@@ -211,6 +244,26 @@ def _build_where(
     if len(conds) == 1:
         return conds[0]
     return {"$and": conds}
+
+def _load_patients() -> Dict[str, Dict[str, Any]]:
+    if PAT_DB_PATH.exists():
+        try:
+            return json.loads(PAT_DB_PATH.read_text())
+        except Exception:
+            return {}
+    return {}
+
+def _save_patients(db: Dict[str, Dict[str, Any]]) -> None:
+    PAT_DB_PATH.write_text(json.dumps(db, indent=2))
+
+def _search_index(rec: Dict[str, Any]) -> str:
+    """Simple concat index for naive search."""
+    parts = [
+        rec.get("patient_id",""), rec.get("mrn",""), rec.get("first",""), rec.get("last",""),
+        rec.get("sex",""), rec.get("dob",""), rec.get("phone",""), rec.get("email",""),
+        rec.get("address",""), rec.get("notes",""),
+    ]
+    return " ".join([str(p or "") for p in parts]).lower()
 
 
 # app.py
@@ -303,102 +356,170 @@ async def auth_logout(authorization: Optional[str] = Header(None)):
     return {"ok": True}
 
 
-@app.post("/analyze",dependencies=[Depends(auth_required)])
+from fastapi import Depends, HTTPException, Header, status, Form, UploadFile, File
+
+# ...
+
+from pathlib import Path
+from fastapi import UploadFile, File, Form, Depends, HTTPException
+from pydantic import ValidationError
+
+@app.post("/analyze", dependencies=[Depends(auth_required)])
 async def analyze(
     file: UploadFile = File(...),
-    patient_age: Optional[int] = Form(None),
-    patient_sex: Optional[str] = Form(None),
     threshold: float = Form(0.5),
-    topk: int = Form(3)  # allow UI to control number of CAMs
-    ):
-    # ---- Create per-encounter folder under artifacts/ ----
+    topk: int = Form(3),              # how many CAMs to render
+    patient_id: str = Form(...),
+):
+    # ---- validate patient ----
+    db = _load_patients()
+    patient = db.get(patient_id)
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient not found")
+
+    # ---- encounter dirs ----
     encounter_id = f"enc_{int(time.time())}"
-    enc_dir = ARTIFACTS_DIR / encounter_id
-    cam_dir = enc_dir / "cams"
+    enc_dir  = ARTIFACTS_DIR / encounter_id
+    cams_dir = enc_dir / "cams"
     enc_dir.mkdir(parents=True, exist_ok=True)
-    cam_dir.mkdir(parents=True, exist_ok=True)
+    cams_dir.mkdir(parents=True, exist_ok=True)
 
-    # ---- Save upload inside encounter ----
+    # ---- save upload ----
     upload_path = enc_dir / f"upload_{file.filename}"
+    raw = await file.read()
     with open(upload_path, "wb") as f:
-        f.write(await file.read())
+        f.write(raw)
 
-    # ---- Predict (torchxrayvision CheXpert) ----
-    cxr = inferencer.predict(str(upload_path), threshold=threshold)
-    qc  = simple_qc(cxr["findings"])
+    # ---- model prediction (no CAMs here) ----
+    try:
+        cxr = inferencer.predict(str(upload_path), threshold=threshold)
+    except TypeError:
+        cxr = inferencer.predict(str(upload_path))
+    findings = cxr.get("findings", [])
+    qc = simple_qc(findings)
 
+    # ---- Grad-CAMs (THIS uses your topk_cam) ----
+    try:
+        cam_pack = inferencer.topk_cam(str(upload_path), topk=int(topk), save_dir=str(cams_dir))
+        cams_raw = cam_pack.get("results", [])  # [{rank,label,score,cam_png}]
+    except Exception:
+        cams_raw = []
+
+    # normalize for response + choose overlay for PDF
+    def _static_url(p: Path) -> str:
+        """Return /static/<relative> for files under ARTIFACTS_DIR.
+        If not under ARTIFACTS_DIR, try to make it so (copy) or fall back to file name.
+        """
+        p = Path(p).resolve()
+        root = ARTIFACTS_DIR  # already resolved above
+        try:
+            rel = p.relative_to(root)
+            return f"/static/{rel.as_posix()}"
+        except Exception:
+            # If file accidentally outside, try to mirror it into artifacts so it can be served
+            # (shouldn't happen if you save CAMs into enc_dir/cams)
+            # As a last resort, just return a name under current encounter won't be reliable to serve.
+            # Prefer copying into encounter dir before calling this helper.
+            return f"/static/{p.name}"
+
+    overlay_path: Path = upload_path  # default fallback
+    cams_for_api = []
+    for c in cams_raw:
+        p = c.get("cam_png")
+        if not p:
+            continue
+        pp = Path(p)
+        if not pp.is_absolute():
+            pp = (Path.cwd() / p).resolve()
+        if not pp.exists():
+            continue
+        if overlay_path is upload_path:      # first valid becomes overlay
+            overlay_path = pp
+        cams_for_api.append({
+            "rank": c.get("rank"),
+            "label": c.get("label"),
+            "score": float(c.get("score")) if c.get("score") is not None else None,
+            "path": str(pp),
+            "url": _static_url(pp),
+        })
+
+    # ---- LLM report ----
     payload = {
-        "patient_context": {"age": patient_age, "sex": patient_sex},
+        "patient_context": {"age": patient.get("dob"), "sex": patient.get("sex")},
         "technical": {"qc": qc},
-        "findings": cxr["findings"],
-        "model": cxr["model"],
-        "uncertainty": "Model-only; needs human review."
+        "findings": findings,
+        "model": cxr.get("model"),
+        "uncertainty": "Model-only; needs human review.",
     }
-
-    # ---- LLM Draft (JSON) ----
     draft = llm_report(payload)
-    # Normalize + merge codes/flags
     draft["report"] = coerce_report(draft.get("report"))
-    draft["codes"]  = coerce_codes(draft.get("codes"))
-    mapped_codes    = coerce_codes(map_codes(cxr["findings"]))
-    draft["codes"]  = merge_codes(draft["codes"], mapped_codes)
+    draft["codes"]  = merge_codes(coerce_codes(draft.get("codes")), coerce_codes(map_codes(findings)))
     draft["flags"]  = coerce_flags(draft.get("flags"))
     draft["disclaimers"] = coerce_disclaimers(draft.get("disclaimers"))
-
-    # PHI scrub (now safe)
     for k in ["indication", "technique", "comparison", "findings"]:
         draft["report"][k] = phi_scrub(draft["report"][k])
-
-    # Ensure disclaimer
-    disc = set(draft.get("disclaimers", []))
-    disc.add("AI-generated draft; requires radiologist review.")
+    disc = set(draft.get("disclaimers", [])); disc.add("AI-generated draft; requires radiologist review.")
     draft["disclaimers"] = list(disc)
 
-    # ---- Validate JSON shape ----
     try:
         pkg = ReportPackage(**draft)
     except ValidationError as e:
         return {"error": "Schema validation failed", "details": json.loads(e.json())}
+    
+    overlay_paths = []
+    for c in cams_for_api:
+        p = c.get("path")
+        if p and Path(p).is_file():
+            overlay_paths.append(p)
+    # ensure first overlay used for hero image too
+    overlay_path = Path(overlay_paths[0]) if overlay_paths else upload_path
 
-    # ---- Export PDF into encounter folder ----
+
+    # ---- PDF (patient + input + overlay + report) ----
     pdf_path = enc_dir / "report.pdf"
-    out_pdf = export_pdf(pkg.model_dump(), out_path=str(pdf_path))
+    export_pdf_with_images(
+        report_json=pkg.model_dump(),
+        patient=patient,
+        input_img=str(upload_path),
+        output_img=str(overlay_path),        # first overlay for backward compat
+        out_path=str(pdf_path),
+        overlay_imgs=overlay_paths[:3],      # <-- NEW: pass all top-3 overlays
+    )
 
-    # ---- Generate Grad-CAM overlays into encounter/cams ----
-    cam_out = inferencer.topk_cam(str(upload_path), topk=int(topk), save_dir=str(cam_dir))
-    cam_assets: List[Dict[str, Any]] = []
-    for r in cam_out["results"]:
-        p = Path(r["cam_png"])
-        cam_assets.append({
-            "rank": r["rank"],
-            "label": r["label"],
-            "score": r["score"],
-            "url": _to_url(p),      # public URL for UI
-            "path": str(p)          # local path (optional)
-        })
-
-    # ---- Ingest PDF into vector DB (use local path, not URL) ----
-    patient_meta = {"age": patient_age, "sex": patient_sex}
+    # ---- (optional) vector ingest ----
     ing = ingest_pdf_report(
         pdf_path=str(pdf_path),
         report_json=pkg.model_dump(),
-        patient_id=str(patient_meta.get("mrn", "anon")),  # replace with true MRN/ID if available (ensure compliance)
+        patient_id=patient_id,
         encounter_id=encounter_id,
-        patient_meta=patient_meta,
+        patient_meta={
+            "mrn": patient.get("mrn"),
+            "first": patient.get("first"),
+            "last": patient.get("last"),
+            "sex": patient.get("sex"),
+            "dob": patient.get("dob"),
+        },
     )
 
-    # ---- Build response ----
+    # ---- artifacts ----
+    artifacts = {
+        "pdf": _static_url(pdf_path),
+        "input_image": _static_url(upload_path),
+        "output_image": _static_url(overlay_path),
+        "cams": cams_for_api,          # <-- all three here with .url
+    }
+
     return {
-        "findings": cxr["findings"],
+        "patient": patient,
+        "encounter_id": encounter_id,
+        "findings": findings,
         "qc": qc,
         "report": pkg.model_dump(),
-        "artifacts": {
-            "pdf": _to_url(pdf_path),
-            "cams": cam_assets,
-            "encounter_id": encounter_id
-        },
-        "ingestion": ing
+        "artifacts": artifacts,
+        "ingestion": ing,
     }
+
+
 
 # run: uvicorn app:app --reload
 
@@ -412,3 +533,83 @@ async def search_reports(
     where = _build_where(critical_only=critical_only, sex=sex)
     hits = vector_search(q, k=k, where=where)
     return {"query": q, "k": k, "where": where, "results": hits}
+
+# ---------------- Patients API ----------------
+
+@app.post("/patients", response_model=Patient, dependencies=[Depends(auth_required)])
+async def create_patient(payload: PatientCreate):
+    db = _load_patients()
+
+    # Prevent duplicate MRN if provided
+    if payload.mrn:
+        for rec in db.values():
+            if (rec.get("mrn") or "").strip() and rec.get("mrn") == payload.mrn:
+                raise HTTPException(status_code=409, detail="MRN already exists")
+
+    now = time.time()
+    pid = uuid.uuid4().hex
+    rec = {
+        "patient_id": pid,
+        "created_at": now,
+        "updated_at": now,
+        **payload.model_dump(),
+    }
+    db[pid] = rec
+    _save_patients(db)
+    return rec
+
+
+@app.get("/patients", dependencies=[Depends(auth_required)])
+async def list_patients(q: Optional[str] = None, limit: int = 50, offset: int = 0):
+    """
+    List patients with a simple 'q' search across fields. Returns {total, items}.
+    """
+    db = _load_patients()
+    items = list(db.values())
+    if q:
+        qq = q.lower().strip()
+        items = [r for r in items if qq in _search_index(r)]
+    total = len(items)
+    items = items[offset : offset + max(0, min(limit, 500))]
+    return {"total": total, "items": items}
+
+
+@app.get("/patients/{patient_id}", response_model=Patient, dependencies=[Depends(auth_required)])
+async def get_patient(patient_id: str):
+    db = _load_patients()
+    rec = db.get(patient_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Patient not found")
+    return rec
+
+
+@app.patch("/patients/{patient_id}", response_model=Patient, dependencies=[Depends(auth_required)])
+async def update_patient(patient_id: str, patch: PatientUpdate):
+    db = _load_patients()
+    rec = db.get(patient_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Patient not found")
+
+    data = patch.model_dump(exclude_unset=True)
+    # MRN uniqueness if being changed
+    if "mrn" in data and data["mrn"]:
+        for pid, other in db.items():
+            if pid != patient_id and (other.get("mrn") or "") == data["mrn"]:
+                raise HTTPException(status_code=409, detail="MRN already exists")
+
+    rec.update(data)
+    rec["updated_at"] = time.time()
+    db[patient_id] = rec
+    _save_patients(db)
+    return rec
+
+
+@app.delete("/patients/{patient_id}", dependencies=[Depends(auth_required)])
+async def delete_patient(patient_id: str):
+    db = _load_patients()
+    if patient_id not in db:
+        raise HTTPException(status_code=404, detail="Patient not found")
+    db.pop(patient_id)
+    _save_patients(db)
+    return {"ok": True}
+
