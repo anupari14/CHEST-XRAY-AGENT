@@ -180,8 +180,11 @@ def export_pdf_with_images(
     # move y below image block
     used_h = max(left_h, card_h + (card_h + card_gap if len(imgs) > 2 else 0))
     y = y - used_h - 1.0 * cm
+    c.showPage()
+    y = H - M
 
     # ---------- report section ----------
+    
     section("Report")
 
     rep = report_json.get("report", {}) if "report" in report_json else report_json

@@ -9,6 +9,7 @@ from db.vectors import ingest_pdf_report,vector_search
 from utils.pdf_export import export_pdf_with_images
 from fastapi import Query, Depends, HTTPException, Header, status, Form
 from fastapi.responses import JSONResponse
+from models.yolo import YOLOInferencer
 
 
 from starlette.staticfiles import StaticFiles
@@ -25,6 +26,8 @@ import uuid, json
 DB_DIR = ARTIFACTS_DIR / "db"
 DB_DIR.mkdir(parents=True, exist_ok=True)
 PAT_DB_PATH = DB_DIR / "patients.json"
+yolo_inferencer = YOLOInferencer(weights=Path("models/best.pt"))
+model_name = "Ultralytics YOLOv8 (class-wise max confidence)"
 
 class PatientBase(BaseModel):
     mrn: Optional[str] = Field(None, description="Medical Record Number / external ID")
@@ -329,7 +332,7 @@ def auth_required(authorization: Optional[str] = Header(None)) -> str:
 # If you trained in a specific path, set env: export YOLO_MODEL_PATH="/path/to/best.pt"
 # or pass a string to LocalYOLO(...)
 
-inferencer = CXRInferencer(weights="densenet121-res224-chex")
+# inferencer = CXRInferencer(weights="densenet121-res224-chex")
 def _to_url(path: Path) -> str:
     """Convert a local artifacts path to a /static URL."""
     rel = path.relative_to(ARTIFACTS_DIR)
@@ -391,19 +394,30 @@ async def analyze(
         f.write(raw)
 
     # ---- model prediction (no CAMs here) ----
-    try:
-        cxr = inferencer.predict(str(upload_path), threshold=threshold)
-    except TypeError:
-        cxr = inferencer.predict(str(upload_path))
-    findings = cxr.get("findings", [])
+    # try:
+    #     cxr = inferencer.predict(str(upload_path), threshold=threshold)
+    # except TypeError:
+    #     cxr = inferencer.predict(str(upload_path))
+    # findings = cxr.get("findings", [])
+    # print(findings)
+    # qc = simple_qc(findings)
+
+    findings, cams_raw = yolo_inferencer.infer_probs_and_overlays(
+        image_path=upload_path,
+        out_dir=cams_dir,
+        conf=float(threshold),
+        iou=0.45,
+        topk=int(topk),
+    )
     qc = simple_qc(findings)
 
     # ---- Grad-CAMs (THIS uses your topk_cam) ----
-    try:
-        cam_pack = inferencer.topk_cam(str(upload_path), topk=int(topk), save_dir=str(cams_dir))
-        cams_raw = cam_pack.get("results", [])  # [{rank,label,score,cam_png}]
-    except Exception:
-        cams_raw = []
+    # try:
+    #     cam_pack = inferencer.topk_cam(str(upload_path), topk=int(topk), save_dir=str(cams_dir))
+    #     cams_raw = cam_pack.get("results", [])  # [{rank,label,score,cam_png}]
+    #     print(cams_raw)
+    # except Exception:
+    #     cams_raw = []
 
     # normalize for response + choose overlay for PDF
     def _static_url(p: Path) -> str:
@@ -422,33 +436,30 @@ async def analyze(
             # Prefer copying into encounter dir before calling this helper.
             return f"/static/{p.name}"
 
-    overlay_path: Path = upload_path  # default fallback
+    # overlay_path: Path = upload_path  # default fallback
+    overlay_paths = []
     cams_for_api = []
     for c in cams_raw:
-        p = c.get("cam_png")
-        if not p:
-            continue
-        pp = Path(p)
-        if not pp.is_absolute():
-            pp = (Path.cwd() / p).resolve()
-        if not pp.exists():
-            continue
-        if overlay_path is upload_path:      # first valid becomes overlay
-            overlay_path = pp
-        cams_for_api.append({
-            "rank": c.get("rank"),
-            "label": c.get("label"),
-            "score": float(c.get("score")) if c.get("score") is not None else None,
-            "path": str(pp),
-            "url": _static_url(pp),
-        })
+        pp = Path(c.get("cam_png", "")).resolve()
+        if pp.exists():
+            overlay_paths.append(str(pp))
+            cams_for_api.append({
+                "rank": c["rank"],
+                "label": c["label"],
+                "score": float(c["score"]),
+                "path": str(pp),
+                "url": _static_url(pp),   # assumes _static_url uses ARTIFACTS_DIR.resolve()
+            })
+
+    # choose first overlay for hero image (fallback to input if none)
+    overlay_path = Path(overlay_paths[0]) if overlay_paths else upload_path
 
     # ---- LLM report ----
     payload = {
         "patient_context": {"age": patient.get("dob"), "sex": patient.get("sex")},
         "technical": {"qc": qc},
         "findings": findings,
-        "model": cxr.get("model"),
+        "model": model_name,
         "uncertainty": "Model-only; needs human review.",
     }
     draft = llm_report(payload)
@@ -481,9 +492,9 @@ async def analyze(
         report_json=pkg.model_dump(),
         patient=patient,
         input_img=str(upload_path),
-        output_img=str(overlay_path),        # first overlay for backward compat
+        output_img=str(overlay_path),         # first overlay for hero/back-compat
         out_path=str(pdf_path),
-        overlay_imgs=overlay_paths[:3],      # <-- NEW: pass all top-3 overlays
+        overlay_imgs=overlay_paths[:3],       # <<< show top-3 overlays
     )
 
     # ---- (optional) vector ingest ----

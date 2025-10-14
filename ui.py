@@ -11,6 +11,62 @@ from PIL import Image
 
 API_URL = os.getenv("MEDAGENT_API_URL", "http://127.0.0.1:8000")
 
+def _auth_hdrs():
+    return st.session_state.get("auth_headers") or {}
+
+def _auth_cookies():
+    return st.session_state.get("auth_cookies") or {}
+
+def do_nav_search():
+    q = (st.session_state.get("nav_search_q") or "").strip()
+    if not q:
+        st.session_state["nav_search_results"] = []
+        return
+    try:
+        r = requests.get(
+            f"{API_URL}/search",
+            params={"q": q, "k": 3},  # Top K hardcoded
+            headers=_headers(),
+            timeout=30,
+        )
+        r.raise_for_status()
+        hits = r.json().get("results", []) or []
+        # sort DESC by score & cap to 3
+        hits = sorted(hits, key=lambda h: float(h.get("score", 0.0)), reverse=True)[:3]
+        st.session_state["nav_search_results"] = hits
+    except Exception as e:
+        st.session_state["nav_search_results"] = []
+        st.session_state["nav_search_error"] = str(e)
+
+def clear_nav_search():
+    st.session_state["nav_search_q"] = ""
+    st.session_state["nav_search_results"] = []
+    st.session_state["nav_search_error"] = ""
+
+def _extract_patient(meta: dict):
+    """Return (name, mrn) from a variety of possible metadata shapes."""
+    meta = meta or {}
+    p = meta.get("patient") or meta.get("patient_meta") or {}
+
+    # names
+    first = p.get("first") or meta.get("first") or meta.get("patient_first") or meta.get("fname") or ""
+    last  = p.get("last")  or meta.get("last")  or meta.get("patient_last")  or meta.get("lname")  or ""
+    name  = meta.get("name") or p.get("name") or f"{first} {last}".strip()
+    name  = name if (name and name.strip()) else "—"
+
+    # mrn/id
+    mrn = (
+        p.get("mrn")
+        or meta.get("mrn")
+        or meta.get("patient_mrn")
+        or meta.get("patient_id")   # sometimes you stored MRN here
+        or meta.get("id")
+        or "—"
+    )
+    return name, mrn
+
+
+
 st.set_page_config(page_title="Medical Agent • Imaging Suite", layout="wide")
 
 # ---------------- Session State ----------------
@@ -63,13 +119,27 @@ def do_logout():
         pass
     st.session_state.update({"token": None, "user": None, "page": "cxr",
                              "last_response": None, "last_uploaded_preview": None})
+    
+# Make /static/... absolute for the browser; pass through http(s) and local paths
+def _abs_or_static(p) -> Optional[str]:
+    if not p:
+        return None
+    s = str(p)
+    if s.startswith("http://") or s.startswith("https://"):
+        return s
+    if s.startswith("/static/"):
+        return f"{API_URL.rstrip('/')}{s}"
+    if s.startswith("static/"):
+        return f"{API_URL.rstrip('/')}/{s}"
+    return s
+
 
 # ---------------- Login gate ----------------
 if not st.session_state.get("token"):
     st.markdown("""
     <div class="app-topbar">
       <div>
-        <div class="app-title">🩻 Medical Agent — Imaging Suite</div>
+        <div class="app-title">Medical Agent</div>
         <div class="app-subtle">AI-generated draft; requires radiologist review. Not for diagnostic use.</div>
       </div>
       <div></div>
@@ -85,18 +155,8 @@ if not st.session_state.get("token"):
     st.stop()
 
 # ---------------- Header (with navbar + user/Logout) ----------------
-left, mid, right = st.columns([1.4, 2.2, 1])
+left, mid, right = st.columns([0.5, 2.2, 1])
 with left:
-    st.markdown("""
-    <div class="app-topbar">
-      <div>
-        <div class="app-title">Medical Agent — Imaging Suite</div>
-        <div class="app-subtle">AI-generated draft; requires radiologist review. Not for diagnostic use.</div>
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-with mid:
     # Single top nav
     labels = ["Patient Registration", "Chest X-Ray Analysis", "Brain Tumour Detection"]
     key_by_label = {
@@ -109,15 +169,53 @@ with mid:
     choice = st.radio("Navigation", labels, index=current_idx, horizontal=True, label_visibility="collapsed")
     st.session_state["page"] = key_by_label[choice]
 
+with mid:
+    with st.container(border=True):
+        st.text_input(
+            "Search reports",
+            key="nav_search_q",
+            placeholder="Search reports…",
+            label_visibility="collapsed",
+            on_change=do_nav_search,   # <-- ENTER triggers search
+        )
+
+
 with right:
-    c1, c2 = st.columns([2, 1])
-    with c1:
-        st.markdown(f"""<div class="userbox">👤 <span class="user">{st.session_state['user']}</span></div>""",
-                    unsafe_allow_html=True)
-    with c2:
-        if st.button("Logout", key="logout_btn", type="secondary", use_container_width=True):
-            do_logout()
-            st.rerun()
+    if st.button(f"Logout ( {st.session_state.get('user','')} )", key="logout_btn", type="secondary", use_container_width=True):
+        do_logout()
+        st.rerun()
+
+# --- Search Results (from top navbar search) ---
+# --- Search Results (under navbar) ---
+if "nav_search_error" in st.session_state and st.session_state.get("nav_search_error"):
+    st.error(f"Search failed: {st.session_state['nav_search_error']}")
+
+results = st.session_state.get("nav_search_results") or []
+if results:
+    st.subheader("Search results")
+    for i, hit in enumerate(results, 1):
+        meta = hit.get("meta", {}) or {}
+        patient = meta.get("patient") or meta.get("patient_meta") or {}
+        name, mrn = _extract_patient(meta)
+        score = float(hit.get("score", 0.0))
+
+        # guess a report link
+        pdf_rel = meta.get("pdf") \
+                  or (meta.get("artifacts") or {}).get("pdf") \
+                  or (f"/static/{meta['encounter_id']}/report.pdf" if meta.get("encounter_id") else None)
+        pdf_url = _abs_or_static(pdf_rel) if pdf_rel else None
+
+        with st.container(border=True):
+            c1, c2, c3, c4 = st.columns([4, 2, 2, 2])
+            c1.markdown(f"**{i}. {name}**")
+            c2.markdown(f"**MRN:** {mrn}")
+            c3.markdown(f"**Score:** {score:.4f}")
+            if pdf_url:
+                c4.markdown(f"[Open report]({pdf_url})")
+
+    st.button("Clear results", on_click=clear_nav_search, type="secondary")
+
+        
 
 # ---------------- Common helpers ----------------
 def load_preview_from_bytes(data: bytes) -> Optional[Image.Image]:
@@ -262,20 +360,21 @@ if st.session_state["page"] == "patient":
 # ======================================================================
 elif st.session_state["page"] == "cxr":
     st.divider()
-    st.header("🩻 Chest X-Ray Analysis")
+    st.header("Chest X-Ray Analysis")
 
     # Controls
     st.subheader("Controls")
-    c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
+    c1, c2, c3 = st.columns([2, 1, 1])
     with c1:
         uploaded = st.file_uploader("Upload Chest X-ray (.png/.jpg/.dcm)", type=["png", "jpg", "jpeg", "dcm"])
         patient_id = st.text_input("Patient ID (MRN) *", help="Enter a valid patient MRN/ID already registered.")
-    with c2:
-        thr = st.slider("Prediction threshold", 0.0, 1.0, 0.60, 0.01)
-    with c3:
-        topk = st.slider("Top-K CAMs", 1, 6, 3)
-    with c4:
         run_cxr = st.button("Analyze", use_container_width=True)
+    with c2:
+        thr = 0.1
+    with c3:
+        topk = 20
+    
+        
 
     if uploaded and (uploaded.type or "").startswith("image/"):
         img = load_preview_from_bytes(uploaded.getvalue())
@@ -369,7 +468,7 @@ elif st.session_state["page"] == "cxr":
             st.info("Upload a chest X-ray above to preview.")
 
     with co:
-        st.subheader("Overlays")
+        st.subheader("AI Findings")
         cam_list = arts.get("cams") or []
         if cam_list:
             cols = st.columns(3)
@@ -392,7 +491,7 @@ elif st.session_state["page"] == "cxr":
 
     # Report + PDF
     st.divider()
-    st.subheader("📝 Draft Report")
+    st.subheader("Report")
     report_block = resp.get("report", {}) or {}
     report = report_block.get("report", {}) or {}
     if report:
@@ -422,49 +521,13 @@ elif st.session_state["page"] == "cxr":
         except Exception as e:
             st.error(f"Could not load PDF: {e}")
 
-    # Top-3 findings
-    st.divider()
-    st.subheader("🏷️ Top-3 Findings")
-    findings = resp.get("findings", []) or []
-    if findings:
-        try:
-            top3 = sorted(findings, key=lambda z: float(z.get("prob", 0.0)), reverse=True)[:3]
-        except Exception:
-            top3 = findings[:3]
-        if top3:
-            df3 = pd.DataFrame(top3)[["label", "prob"]]
-            df3["prob"] = df3["prob"].map(lambda x: round(float(x), 3))
-            st.dataframe(df3, use_container_width=True, hide_index=True)
-        else:
-            st.info("No findings available.")
-    else:
-        st.info("No findings available. Run analysis first.")
-
-    # Search (last)
-    st.divider()
-    st.subheader("🔎 Semantic Search")
-    q = st.text_input("Query across reports", placeholder="e.g., large right pleural effusion with cardiomegaly")
-    kk = st.slider("Top K", 1, 20, 5)
-    if st.button("Search") and q.strip():
-        try:
-            r = requests.get(f"{API_URL}/search", params={"q": q, "k": kk}, headers=_headers(), timeout=60)
-            r.raise_for_status()
-            res = r.json()
-            for i, hit in enumerate(res.get("results", []), 1):
-                score = hit.get("score")
-                st.markdown(f"**{i}. score:** {score:.4f}" if isinstance(score, (int, float)) else f"**{i}.**")
-                st.write((hit.get("text","") or "")[:800] + ("…" if hit.get("text") else ""))
-                st.json(hit.get("meta", {}) or {})
-                st.divider()
-        except Exception as e:
-            st.error(f"Search failed: {e}")
 
 # ======================================================================
 # PAGE 3: BRAIN TUMOUR DETECTION (placeholder; optional /brain/infer)
 # ======================================================================
 elif st.session_state["page"] == "brain":
     st.divider()
-    st.header("🧠 Brain Tumour Detection")
+    st.header("Brain Tumour Detection")
 
     c1, c2, c3 = st.columns([2, 1, 1])
     with c1:
