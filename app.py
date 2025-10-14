@@ -10,6 +10,7 @@ from utils.pdf_export import export_pdf_with_images
 from fastapi import Query, Depends, HTTPException, Header, status, Form
 from fastapi.responses import JSONResponse
 from models.yolo import YOLOInferencer
+import hashlib
 
 
 from starlette.staticfiles import StaticFiles
@@ -267,6 +268,131 @@ def _search_index(rec: Dict[str, Any]) -> str:
         rec.get("address",""), rec.get("notes",""),
     ]
     return " ".join([str(p or "") for p in parts]).lower()
+
+class ChatRequest(BaseModel):
+    query: str
+    k: int = 4
+    filters: Optional[dict] = None
+    session_id: Optional[str] = None
+
+class ChatSource(BaseModel):
+    rank: int
+    score: float
+    encounter_id: Optional[str] = None
+    mrn: Optional[str] = None
+    patient_name: Optional[str] = None
+    pdf: Optional[str] = None     # /static/... (UI will prefix with API_URL)
+    text: str
+
+class ChatResponse(BaseModel):
+    answer: str
+    sources: List[ChatSource]
+    usage: Dict[str, Optional[int]] = {}
+
+def _usage_to_dict(u: Any) -> Dict[str, Optional[int]]:
+    """Normalize OpenAI usage to a plain dict (object- or dict-safe)."""
+    if u is None:
+        return {}
+    try:
+        return {
+            "prompt_tokens": getattr(u, "prompt_tokens", None),
+            "completion_tokens": getattr(u, "completion_tokens", None),
+            "total_tokens": getattr(u, "total_tokens", None),
+        }
+    except Exception:
+        return {
+            "prompt_tokens": (u or {}).get("prompt_tokens"),
+            "completion_tokens": (u or {}).get("completion_tokens"),
+            "total_tokens": (u or {}).get("total_tokens"),
+        }
+
+def _build_context(hits: List[dict]) -> str:
+    """Builds the text context given retrieval hits (each hit has .text and .meta)."""
+    blocks = []
+    for i, h in enumerate(hits, 1):
+        m = h.get("meta", {}) or {}
+        # robust patient extraction
+        patient = m.get("patient") or m.get("patient_meta") or {}
+        first = patient.get("first") or m.get("first") or ""
+        last  = patient.get("last")  or m.get("last")  or ""
+        name  = m.get("patient_name") or m.get("name") or f"{first} {last}".strip() or "—"
+        mrn   = patient.get("mrn") or m.get("mrn") or m.get("patient_mrn") or m.get("patient_id") or "—"
+        score = float(h.get("score", 0.0))
+        body  = (h.get("text") or "")[:2500]  # keep context bounded
+        blocks.append(f"[{i}] Patient: {name} | MRN: {mrn} | Score: {score:.4f}\n{body}")
+    return "\n\n---\n".join(blocks)
+
+def _report_key(meta: Dict[str, Any]) -> str:
+    """
+    Build a stable key for a report from metadata with multiple fallbacks.
+    This prevents duplicate rows when multiple chunks match the same report.
+    Priority:
+      1) doc_id / encounter_id / report_id
+      2) PDF path (prefer enc_ folder name if present)
+      3) local path (path/file/report_path)
+      4) precomputed hash / text_id
+      5) SHA1 of text (first 1000 chars)
+    """
+    m = meta or {}
+
+    # 1) explicit ids if you have them
+    for k in ("doc_id", "encounter_id", "report_id"):
+        if m.get(k):
+            return f"{k}:{m[k]}"
+
+    # 2) PDF path (often /static/enc_xxx/report.pdf)
+    pdf = m.get("pdf") or (m.get("artifacts") or {}).get("pdf")
+    if pdf:
+        try:
+            p = Path(pdf)
+            # try to use the encounter folder if available
+            for part in reversed(p.parts):
+                if part.startswith("enc_"):
+                    return f"enc:{part}"
+            return f"pdf:{p.stem}"
+        except Exception:
+            return f"pdf:{pdf}"
+
+    # 3) local path fields you might have saved
+    for k in ("path", "file", "report_path"):
+        if m.get(k):
+            try:
+                return f"path:{Path(m[k]).stem}"
+            except Exception:
+                return f"path:{m[k]}"
+
+    # 4) precomputed hash or text id
+    for k in ("hash", "text_id"):
+        if m.get(k):
+            return f"{k}:{m[k]}"
+
+    # 5) last resort: hash text
+    txt = (m.get("full_text") or m.get("text") or "")
+    if txt:
+        h = hashlib.sha1(txt[:1000].encode("utf-8", "ignore")).hexdigest()
+        return f"sha1:{h}"
+
+    # absolute fallback (should rarely be hit)
+    return f"row:{id(m)}"
+
+
+def _dedupe_hits_by_report(hits: List[Dict[str, Any]], limit: Optional[int] = None) -> List[dict]:
+    """
+    Collapse multiple chunks from the same report into one row using _report_key.
+    Keep the highest-scoring hit per report; return sorted DESC by score.
+    """
+    buckets: Dict[str, Dict[str, Any]] = {}
+    for h in hits or []:
+        key = _report_key((h.get("meta") or {}))
+        sc = float(h.get("score", 0.0))
+        if key not in buckets or sc > buckets[key]["score"]:
+            buckets[key] = {"hit": h, "score": sc}
+
+    uniq = sorted(buckets.values(), key=lambda x: x["score"], reverse=True)
+    out = [g["hit"] for g in uniq]
+    if limit is not None:
+        out = out[: int(limit)]
+    return out
 
 
 # app.py
@@ -624,3 +750,74 @@ async def delete_patient(patient_id: str):
     _save_patients(db)
     return {"ok": True}
 
+@app.post("/chat", response_model=ChatResponse)
+async def chat(req: ChatRequest) -> ChatResponse:
+    # 1) Retrieve similar chunks
+    try:
+        raw = vector_search(req.query, k=int(req.k), where=req.filters or None)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Vector search failed: {e}")
+
+    raw_hits = raw.get("results", []) if isinstance(raw, dict) else raw or []
+
+    # 2) Dedupe by report (so UI shows 1 row per report)
+    uniq_hits = _dedupe_hits_by_report(raw_hits, limit=req.k)
+
+
+    # 3) Build model context (you can choose uniq_hits or raw_hits for richer context)
+    context = _build_context(uniq_hits)
+
+    system = (
+        "You are a careful radiology assistant. Use ONLY the provided CONTEXT. "
+        "Each context block starts with a header like: "
+        "[n] Patient: <NAME> | MRN: <MRN> | Score: <SCORE>. "
+        "When referring to a patient, ALWAYS use the name and MRN from that header "
+        "instead of 'context [n]'. "
+        "Give a concise bulleted list (e.g., '• NAME (MRN: …): <brief evidence>') "
+        "followed by a short summary. Do NOT invent details."
+    )
+    user = f"User question: {req.query}\n\nCONTEXT:\n{context}"
+
+    # 4) LLM call
+    try:
+        from openai import OpenAI
+        client = OpenAI()
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            temperature=0.2,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        )
+        answer = resp.choices[0].message.content
+        usage_dict = _usage_to_dict(getattr(resp, "usage", None))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"LLM call failed: {e}")
+
+    # 5) Build sources from UNIQUE hits
+    def _src_row(i: int, h: dict) -> Dict[str, Any]:
+        m = h.get("meta", {}) or {}
+        patient = m.get("patient") or m.get("patient_meta") or {}
+        first = patient.get("first") or m.get("first") or ""
+        last  = patient.get("last")  or m.get("last")  or ""
+        name  = m.get("patient_name") or m.get("name") or f"{first} {last}".strip() or "—"
+        mrn   = patient.get("mrn") or m.get("mrn") or m.get("patient_mrn") or m.get("patient_id") or "—"
+        pdf_rel = (
+            m.get("pdf")
+            or (m.get("artifacts") or {}).get("pdf")
+            or (f"/static/{m['encounter_id']}/report.pdf" if m.get("encounter_id") else None)
+        )
+        return {
+            "rank": i + 1,
+            "score": float(h.get("score", 0.0)),
+            "encounter_id": m.get("encounter_id") or m.get("encounter") or "",
+            "mrn": mrn,
+            "patient_name": name,
+            "pdf": pdf_rel,   # UI will prefix with MEDAGENT_API_URL
+            "text": (h.get("text") or "")[:1000],
+        }
+
+    sources = [_src_row(i, h) for i, h in enumerate(uniq_hits)]
+
+    return ChatResponse(answer=answer, sources=sources, usage=usage_dict)

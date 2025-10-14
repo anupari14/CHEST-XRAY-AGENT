@@ -9,6 +9,7 @@ import pandas as pd
 import streamlit as st
 from PIL import Image
 
+
 API_URL = os.getenv("MEDAGENT_API_URL", "http://127.0.0.1:8000")
 
 def _auth_hdrs():
@@ -520,6 +521,68 @@ elif st.session_state["page"] == "cxr":
                     st.download_button("⬇️ Download PDF", data=fh.read(), file_name="report.pdf", mime="application/pdf")
         except Exception as e:
             st.error(f"Could not load PDF: {e}")
+    
+    # ---- Chatbot (RAG) ----
+    st.divider()
+    st.header("💬 Report Chatbot")
+
+    if "chat_history" not in st.session_state:
+        st.session_state["chat_history"] = []
+
+    # render prior messages
+    for role, content in st.session_state["chat_history"]:
+        with st.chat_message(role):
+            st.markdown(content)
+
+    prompt = st.chat_input("Ask about findings, impressions, trends…")
+    if prompt:
+        # show user message
+        st.session_state["chat_history"].append(("user", prompt))
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        # call backend
+        try:
+            r = requests.post(
+                f"{API_URL}/chat",
+                json={"query": prompt, "k": 4},
+                headers=_auth_hdrs(),
+                cookies=_auth_cookies(),
+                timeout=60,
+            )
+            r.raise_for_status()
+            data = r.json()
+            answer = data.get("answer", "")
+            sources = data.get("sources", []) or []
+
+            # assistant msg + citations
+            with st.chat_message("assistant"):
+                st.markdown(answer)
+
+                sources = data.get("sources", []) or []
+                if sources:
+                    st.markdown("**Matches**")
+                    for s in sources:
+                        name = s.get("patient_name") or "—"
+                        mrn  = s.get("mrn") or "—"
+                        score = float(s.get("score", 0.0))
+                        pdf = _abs_or_static(s.get("pdf")) if s.get("pdf") else None
+
+                        cols = st.columns([5, 2, 2, 3])
+                        cols[0].markdown(f"**{name}**")
+                        cols[1].markdown(f"**MRN:** {mrn}")
+                        cols[2].markdown(f"**Score:** {score:.4f}")
+                        if pdf:
+                            cols[3].markdown(f"[Open report]({pdf})")
+            st.session_state["chat_history"].append(("assistant", answer))
+        except Exception as e:
+            with st.chat_message("assistant"):
+                st.error(f"Chat failed: {e}")
+
+    # clear thread
+    if st.button("Clear chat", type="secondary"):
+        st.session_state["chat_history"] = []
+
 
 
 # ======================================================================
