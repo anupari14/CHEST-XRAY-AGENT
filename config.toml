@@ -1,0 +1,9 @@
+# .streamlit/config.toml
+[theme]
+base = "light"
+primaryColor = "#6E8797"            # Highlight Blue → buttons/links
+backgroundColor = "#2D3B44"         # Shadow Grey → full-page background (dark)
+secondaryBackgroundColor = "#F5F7F8" # Soft White → cards/containers
+textColor = "#F5F7F8"               # Light text for dark bg
+font = "sans serif"
+

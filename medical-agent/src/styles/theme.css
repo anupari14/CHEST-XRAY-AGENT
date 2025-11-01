@@ -1,0 +1,308 @@
+/* =============================
+   AIDx Theme — Global Styles
+   ============================= */
+
+/* ---------- CSS Variables ---------- */
+:root{
+  /* Brand */
+  --brand-primary: #2F4858;
+  --brand-primary-600: #435766;
+  --brand-accent: #5E7382;
+  --brand-ink: #0F172A;
+  --brand-muted: #6B7280;
+
+  /* Surfaces */
+  --brand-soft: #F5F7F8;   /* app bg */
+  --card-bg: #FFFFFF;
+  --card-border: #E5EAF0;
+
+  /* Focus */
+  --focus: #3B82F6;
+
+  /* Layout */
+  --page-gutter: 24px;
+
+  /* Patient list accents */
+  --patient-row-border: #b9d6ff;
+  --patient-row-border-strong: #8db8ff;
+  --patient-row-bg: #f7fbff;
+}
+
+@media (max-width: 640px){
+  :root{ --page-gutter: 16px; }
+}
+
+/* ---------- Base ---------- */
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; }
+html, body { width: 100%; }
+body{
+  margin: 0;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Inter, "Helvetica Neue", Arial, "Apple Color Emoji", "Segoe UI Emoji";
+  color: var(--brand-ink);
+  background: #F3F6F8;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+h1,h2,h3{ margin: 0 0 .5rem 0; line-height: 1.25; }
+h1{ font-size: 1.4rem; }
+h2{ font-size: 1.2rem; }
+h3{ font-size: 1.05rem; }
+
+.subtle{ color: var(--brand-muted); }
+
+.logo-lockup{ display: flex; align-items: center; gap: 10px; }
+.logo-lockup h1{ font-size: 1.05rem; font-weight: 700; }
+
+/* ---------- Cards / Surfaces ---------- */
+.card{
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 14px;
+  box-shadow: 0 6px 20px rgba(0,0,0,.05);
+  width: 100%;
+  min-width: 0;
+}
+.card:has(.subtle){ min-height: 280px; } /* keep empty panels from collapsing */
+
+/* Patient row emphasis */
+.card.patient-row{
+  border-color: var(--patient-row-border);
+  background: var(--patient-row-bg);
+  border-width: 1.5px;
+}
+.card.patient-row:hover{
+  border-color: var(--patient-row-border-strong);
+  box-shadow: 0 4px 14px rgba(40, 91, 255, 0.08);
+}
+
+/* ---------- Buttons ---------- */
+.btn{
+  display: inline-flex; align-items: center; justify-content: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--brand-primary);
+  background: var(--brand-primary);
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background .15s ease, box-shadow .15s ease, border-color .15s ease, color .15s ease;
+  user-select: none;
+}
+.btn:hover{ background: var(--brand-primary-600); }
+.btn:disabled{ opacity: .6; cursor: not-allowed; }
+
+/* ---------- Inputs ---------- */
+.input, .textarea, .select, input[type="file"]{
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--card-border);
+  background: #fff;
+  color: var(--brand-ink);
+  outline: none;
+  font-size: .95rem;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.textarea{ min-height: 90px; }
+.select{ height: 40px; }
+.input:focus, .textarea:focus, .select:focus{
+  border-color: var(--focus);
+  box-shadow: 0 0 0 3px rgba(59,130,246,.2);
+}
+::placeholder{ color: #9AA3AF; }
+
+/* ---------- Spacing Utilities ---------- */
+.space-y-4 > * + * { margin-top: 1rem; }
+.space-y-6 > * + * { margin-top: 1.5rem; }
+
+/* ---------- Full-bleed Layout Fixes ---------- */
+html, body, #root { max-width: none !important; }
+#root{
+  width: 100% !important;
+  max-width: 100% !important;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+main, .page, .page-container,
+.wrapper, .wrap, .container, .content, .inner, .layout, .app, .app-shell {
+  width: 100% !important;
+  max-width: 100% !important;
+  margin: 0 !important;
+  padding-left: var(--page-gutter) !important;
+  padding-right: var(--page-gutter) !important;
+}
+main, main > section { width: 100%; max-width: 100% !important; }
+
+/* ---------- Grid Utilities ---------- */
+.grid-12{
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 12px;
+}
+.col-span-4{ grid-column: span 4 / span 4; }
+.col-span-6{ grid-column: span 6 / span 6; }
+.col-span-8{ grid-column: span 8 / span 8; }
+
+@media (max-width: 1024px){
+  .col-span-8, .col-span-6, .col-span-4 { grid-column: 1 / -1; }
+}
+
+/* Simple two-col helper (used on CXR/Brain panels) */
+.grid-2{
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+/* ---------- Encounter cards (images + report vertically) ---------- */
+.encounter-card{
+  display: grid;
+  grid-template-rows: auto 1fr; /* images row, then report fills */
+  gap: 12px;
+}
+.encounter-images{
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr)); /* input / overlay */
+  gap: 12px;
+}
+.encounter-images .thumb{
+  border-radius: 12px;
+  border: 1px solid var(--card-border);
+  overflow: hidden;
+  background: #fff;
+}
+.encounter-images img{ display:block; width:100%; height:auto; }
+.encounter-report{
+  border: 1px solid var(--card-border);
+  border-radius: 12px;
+  padding: 12px;
+  background: #fff;
+}
+
+/* Use full width under “Patient Records” and space cards evenly */
+.encounter-grid{
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 16px;
+  width: 100%;
+}
+
+/* =============================
+   Micro-graphic animations
+   ============================= */
+@keyframes mg-float { 0%{transform:translateY(0)} 50%{transform:translateY(-4px)} 100%{transform:translateY(0)} }
+@keyframes mg-pulse { 0%{transform:scale(1);opacity:.9} 50%{transform:scale(1.25);opacity:.6} 100%{transform:scale(1);opacity:.9} }
+.mg-float { animation: mg-float 6s ease-in-out infinite; }
+.mg-pulse { animation: mg-pulse 2.8s ease-in-out infinite; transform-origin: center; }
+@media (prefers-reduced-motion: reduce){ .mg-float, .mg-pulse, .chat-dot { animation: none !important; } }
+
+/* =============================
+   Floating Chatbot (launcher + panel)
+   ============================= */
+.chat-launcher{
+  position: fixed; right: 18px; bottom: 18px; z-index: 60;
+  height: 52px; padding: 0 14px; border-radius: 999px;
+  display: inline-flex; align-items: center; gap: 10px;
+  background: var(--brand-primary); color:#fff; border:1px solid var(--brand-primary);
+  box-shadow: 0 12px 30px rgba(16,24,40,.18);
+  font-weight: 600; letter-spacing:.2px;
+}
+.chat-launcher:hover{ background: var(--brand-primary-600); }
+.chat-launcher-label{ display: none; }
+@media (min-width: 920px){ .chat-launcher-label{ display: inline; } }
+.chat-badge{
+  min-width: 18px; height: 18px; border-radius: 999px; padding: 0 6px;
+  background: #ef4444; color:#fff; font-size: 12px;
+  display: inline-flex; align-items:center; justify-content:center;
+}
+
+.chat-panel-wrap{
+  position: fixed; right: 16px; bottom: 16px; z-index: 60;
+  width: 380px; max-width: calc(100vw - 24px);
+}
+@media (max-width: 640px){ .chat-panel-wrap{ inset: 0; width: 100vw; } }
+
+.chat-panel{
+  border-radius: 16px; overflow: hidden; background:#fff;
+  box-shadow: 0 18px 60px rgba(16,24,40,.18);
+  display: flex; flex-direction: column; height: 560px;
+}
+@media (max-width: 640px){ .chat-panel{ height: 100vh; border-radius: 0; } }
+
+.chat-head{
+  display:flex; align-items:center; justify-content:space-between; gap:8px;
+  padding: 10px 12px; border-bottom: 1px solid var(--card-border); background: #f7fafc;
+}
+.chat-prompts{ padding: 8px 10px; display:flex; gap:8px; flex-wrap: wrap; }
+.chat-chip{
+  background:#fff; color:var(--brand-ink); border:1px solid var(--card-border);
+  padding:6px 10px; border-radius: 999px; font-weight:500;
+}
+
+.chat-body{ flex: 1; overflow-y:auto; padding: 10px 12px; background: #fbfdff; }
+.chat-error{ color:#b42318; background:#fee4e2; border-top:1px solid #fecdca; padding:6px 10px; font-size:.9rem; }
+.chat-input{ display:flex; gap:8px; padding:8px 10px; border-top:1px solid var(--card-border); background:#fff; }
+
+.chat-bubble{
+  max-width: 72%; padding: 8px 12px; border-radius: 16px;
+  box-shadow: 0 2px 8px rgba(67,87,102,.12); line-height: 1.45; white-space: pre-wrap;
+}
+.chat-bubble-avatar{
+  height:26px; width:26px; border-radius:50%; background:#fff;
+  border:1px solid var(--card-border); color:var(--brand-ink);
+  display:flex; align-items:center; justify-content:center; font-size:12px;
+}
+.chat-bubble-avatar.user{ background: var(--brand-primary); color:#fff; border-color: var(--brand-primary); }
+
+.chat-typing{ display:inline-flex; gap:4px; background:#F5F7F8; border-radius:16px; padding:8px 12px; }
+.chat-dot{
+  width:6px; height:6px; border-radius:50%;
+  background: var(--brand-muted);
+  display:inline-block;
+  animation: chat-dot 1s ease-in-out infinite;
+}
+@keyframes chat-dot{
+  0%,80%,100%{ transform: scale(.6); opacity:.5 }
+  40%{ transform: scale(1); opacity:1 }
+}
+
+:root{
+  --patient-row-border: #b9d6ff;        /* light blue */
+  --patient-row-border-strong: #8db8ff; /* on hover/focus */
+  --patient-row-bg: #f7fbff;            /* very light blue bg */
+}
+
+.card.patient-row{
+  border-color: var(--patient-row-border);
+  background: var(--patient-row-bg);
+  border-width: 1.5px;                 /* slightly thicker than default */
+}
+
+.card.patient-row:hover{
+  border-color: var(--patient-row-border-strong);
+  box-shadow: 0 4px 14px rgba(40, 91, 255, 0.08);
+}
+
+/* Floating button inside a card */
+.card.pos-rel { position: relative; }
+.fab-analyze {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 2;
+  padding: 12px 16px;
+  border-radius: 999px;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, .18);
+}
+@media (max-width: 640px){
+  .fab-analyze { right: 10px; bottom: 10px; }
+}
+
+/* Make click-zones visible on hover (optional) */
+.carousel-zone:hover {
+  background: rgba(15, 23, 42, .04);
+}

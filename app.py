@@ -9,12 +9,15 @@ from db.vectors import ingest_pdf_report,vector_search
 from utils.pdf_export import export_pdf_with_images
 from fastapi import Query, Depends, HTTPException, Header, status, Form
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from models.yolo import YOLOInferencer
 import hashlib
 
 
 from starlette.staticfiles import StaticFiles
 from pathlib import Path
+
+
 
 ARTIFACTS_DIR = Path(os.getenv("ARTIFACTS_DIR", "artifacts")).resolve()
 ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -410,6 +413,20 @@ from app import ReportPackage  # if split; or paste classes here directly
 
 app = FastAPI(title="Medical Agent: CXR → Report")
 app.mount("/static", StaticFiles(directory=str(ARTIFACTS_DIR)), name="static")
+origins = [
+    "http://localhost:5173",   # Vite dev
+    "http://127.0.0.1:5173",
+    # add your deployed frontend origins here
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,         # DO NOT use ["*"] if you send cookies
+    allow_credentials=True,        # set True if you use cookies/session
+    allow_methods=["GET","POST","PUT","PATCH","DELETE","OPTIONS"],
+    allow_headers=["*"],           # or explicitly: ["Authorization","Content-Type"]
+)
+
+
 
 # ---- Simple Users & Tokens (demo) ----
 # Comma-separated "user:password" pairs (DEMO ONLY; use a real DB in prod)
@@ -452,7 +469,70 @@ def auth_required(authorization: Optional[str] = Header(None)) -> str:
     return _check_token(token)
 
 
+# ---- Encounters: JSON-backed index (under ARTIFACTS_DIR/db) ----
+ENCOUNTERS_DB_PATH = DB_DIR / "encounters.json"
 
+def _load_encounters() -> Dict[str, Dict[str, Any]]:
+    if ENCOUNTERS_DB_PATH.exists():
+        try:
+            return json.loads(ENCOUNTERS_DB_PATH.read_text())
+        except Exception:
+            return {}
+    return {}
+
+def _save_encounters(db: Dict[str, Dict[str, Any]]) -> None:
+    ENCOUNTERS_DB_PATH.write_text(json.dumps(db, indent=2))
+
+def _encounters_for_patient(pid: str) -> List[Dict[str, Any]]:
+    db = _load_encounters()
+    return [e for e in db.values() if e.get("patient_id") == pid]
+
+def _fs_backfill_encounters() -> Dict[str, Dict[str, Any]]:
+    """
+    If encounters.json is missing/empty, scan ARTIFACTS_DIR for enc_* folders
+    and backfill a minimal index. Safe to call; it's idempotent.
+    """
+    idx = _load_encounters()
+    for child in ARTIFACTS_DIR.glob("enc_*"):
+        if not child.is_dir():
+            continue
+        enc_id = child.name
+        if enc_id in idx:
+            continue
+        # Try to infer patient id from vectorized metadata later if needed.
+        # Here we only record what's obviously present.
+        pdf = (child / "report.pdf")
+        cams_dir = (child / "cams")
+        input_img = None
+        overlay = None
+        # pick first image-like file as input fallback
+        for cand in [*child.glob("upload_*"), *child.glob("*.png"), *child.glob("*.jpg"), *child.glob("*.jpeg")]:
+            input_img = _to_url(cand)  # uses your existing helper
+            break
+        # choose any overlay under cams
+        if cams_dir.exists():
+            for cand in cams_dir.glob("*.png"):
+                overlay = _to_url(cand)
+                break
+
+        idx[enc_id] = {
+            "encounter_id": enc_id,
+            "patient_id": None,   # unknown from FS alone
+            "created_at": child.stat().st_mtime,
+            "artifacts": {
+                "pdf": _to_url(pdf) if pdf.exists() else None,
+                "input_image": input_img,
+                "output_image": overlay,
+            },
+            "modality": "CXR",    # best-effort default
+        }
+    _save_encounters(idx)
+    return idx
+
+try:
+    _fs_backfill_encounters()
+except Exception:
+    pass
 
 # ---- YOLO singleton (loads once) ----
 # If you trained in a specific path, set env: export YOLO_MODEL_PATH="/path/to/best.pt"
@@ -646,6 +726,22 @@ async def analyze(
         "cams": cams_for_api,          # <-- all three here with .url
     }
 
+    # --- persist encounter ---
+    enc_idx = _load_encounters()
+    enc_rec = {
+        "encounter_id": encounter_id,
+        "patient_id": patient_id,
+        "created_at": time.time(),
+        "modality": "CXR",
+        "model": model_name,
+        "qc": qc,
+        "findings": findings,
+        "report": pkg.model_dump(),           # full structured report
+        "artifacts": artifacts,               # pdf / input_image / output_image / cams
+    }
+    enc_idx[encounter_id] = enc_rec
+    _save_encounters(enc_idx)
+
     return {
         "patient": patient,
         "encounter_id": encounter_id,
@@ -749,6 +845,94 @@ async def delete_patient(patient_id: str):
     db.pop(patient_id)
     _save_patients(db)
     return {"ok": True}
+
+# ---------------- Patient Records / Reports ----------------
+
+@app.get("/patients/{patient_id}/records", dependencies=[Depends(auth_required)])
+async def get_patient_records(patient_id: str):
+    """
+    Returns lightweight study/record rows for a patient.
+    Shape matches what the UI expects for the 'Patient Records' section.
+    """
+    # ensure patient exists
+    _ = await get_patient(patient_id)
+
+    # ensure index exists (best-effort FS backfill)
+    if not ENCOUNTERS_DB_PATH.exists():
+        _fs_backfill_encounters()
+
+    encs = _encounters_for_patient(patient_id)
+
+    items = []
+    for e in sorted(encs, key=lambda x: x.get("created_at", 0), reverse=True):
+        arts = e.get("artifacts", {}) or {}
+        cams = arts.get("cams") or []
+        overlay = None
+        if cams and isinstance(cams, list):
+            # prefer first cam url if present
+            overlay = cams[0].get("url") or cams[0].get("path")
+            if overlay and isinstance(overlay, str) and not overlay.startswith("/static/"):
+                try:
+                    overlay = _to_url(Path(overlay))
+                except Exception:
+                    pass
+        overlay = overlay or arts.get("output_image")
+
+        items.append({
+            "study_id": e.get("encounter_id"),
+            "created_at": e.get("created_at"),
+            "modality": e.get("modality", "CXR"),
+            "image_url": arts.get("input_image"),
+            "overlay_url": overlay,
+            "cams": cams,  # keep raw if you want thumbs later
+        })
+
+    return {"items": items}
+
+
+@app.get("/patients/{patient_id}/reports", dependencies=[Depends(auth_required)])
+async def get_patient_reports(patient_id: str):
+    """
+    Returns report rows with PDF links for a patient.
+    """
+    # ensure patient exists
+    _ = await get_patient(patient_id)
+
+    # ensure index exists (best-effort FS backfill)
+    if not ENCOUNTERS_DB_PATH.exists():
+        _fs_backfill_encounters()
+
+    encs = _encounters_for_patient(patient_id)
+
+    items = []
+    for e in sorted(encs, key=lambda x: x.get("created_at", 0), reverse=True):
+        arts = e.get("artifacts", {}) or {}
+        rpt  = e.get("report", {}) or {}
+        body = rpt.get("report", {}) or {}
+        items.append({
+            "report_id": e.get("encounter_id"),
+            "created_at": e.get("created_at"),
+            "pdf_url": arts.get("pdf"),
+            "findings": body.get("findings"),
+            "impression": body.get("impression"),
+        })
+
+    return {"items": items}
+
+
+# Optional convenience endpoint the UI can also use:
+@app.get("/patients/{patient_id}/analyses", dependencies=[Depends(auth_required)])
+async def get_patient_analyses(patient_id: str):
+    """
+    Combined, more verbose per-encounter view (records + reports + artifacts).
+    """
+    _ = await get_patient(patient_id)
+    if not ENCOUNTERS_DB_PATH.exists():
+        _fs_backfill_encounters()
+    encs = _encounters_for_patient(patient_id)
+    encs = sorted(encs, key=lambda x: x.get("created_at", 0), reverse=True)
+    return {"items": encs}
+
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest) -> ChatResponse:

@@ -8,6 +8,220 @@ import requests
 import pandas as pd
 import streamlit as st
 from PIL import Image
+from pathlib import Path
+
+ASSETS = Path("assets")
+LOGO = ASSETS / "AIDx-logo.png"   # update filename if different
+
+st.set_page_config(
+    page_title="Medical Agent",
+    page_icon=str(LOGO),  # favicon
+    layout="wide"
+)
+st.markdown("""
+<style>
+:root{
+  --brand-primary:#435766;   /* Primary Blue-Grey */
+  --brand-accent:#5E7382;    /* Accent Teal-Grey  */
+  --brand-soft:#F5F7F8;      /* Soft White        */
+  --brand-shadow:#2D3B44;    /* Shadow Grey       */
+  --brand-highlight:#6E8797; /* Highlight Blue    */
+}
+
+/* Header bar + subtle divider */
+[data-testid="stHeader"]{
+  background: transparent;
+  border-bottom: none;
+}
+
+/* Headings and section titles */
+h1, h2, h3, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3{
+  color: var(--brand-primary) !important;
+}
+
+/* Inputs: border tint */
+.stTextInput input, .stPassword input, .stSelectbox div[data-baseweb="select"] > div {
+  border: 1px solid var(--brand-accent) !important;
+  box-shadow: none !important;
+}
+
+/* Primary button */
+.stButton > button {
+  background: var(--brand-primary) !important;
+  color: #fff !important;
+  border: 1px solid var(--brand-shadow) !important;
+}
+.stButton > button:hover {
+  background: var(--brand-highlight) !important;
+  border-color: var(--brand-shadow) !important;
+}
+
+/* Accent details: help text, small labels */
+small, .stCaption, .st-emotion-cache-16idsys p {
+  color: var(--brand-accent) !important;
+}
+
+/* Optional: “card” feel for your Login block */
+.section-card {
+  background: #FFFFFF;
+  border: 1px solid var(--brand-accent);
+  border-radius: 10px;
+  padding: 1.2rem 1.2rem 1.0rem;
+  box-shadow: 0 2px 10px rgba(45,59,68,0.08);
+}
+/* HIDE Streamlit's default header + toolbar/menu */
+[data-testid="stHeader"] { display: none !important; }
+[data-testid="stToolbar"] { display: none !important; }  /* removes Deploy & kebab menu */
+#MainMenu { visibility: hidden; }                         /* legacy menu */
+
+/* Pull content up now that the default header is gone */
+.block-container { padding-top: 0.75rem; }
+            
+/* === Chatbot panel === */
+.chat-panel{
+  background:#ffffff;
+  border:1px solid var(--brand-accent);
+  border-radius:16px;
+  box-shadow:0 6px 20px rgba(0,0,0,.08);
+  max-width: 980px;
+}
+.chat-header{
+  display:flex; align-items:center; gap:.6rem;
+  padding:12px 16px; border-bottom:1px solid #e7eef4;
+}
+.chat-scroll{
+  max-height: 520px;               /* adjust height */
+  overflow-y: auto;
+  padding: 14px 16px 4px 16px;
+  background:#fbfdff;
+}
+
+/* message bubbles */
+.msg{ display:flex; gap:.6rem; margin:8px 0; }
+.msg .avatar{
+  width:28px; height:28px; border-radius:50%;
+  background: var(--brand-primary); color:#fff;
+  display:flex; align-items:center; justify-content:center;
+  font-size:.8rem; flex-shrink:0;
+}
+.msg .bubble{
+  max-width:72%;
+  padding:10px 14px; border-radius:16px;
+  box-shadow:0 2px 8px rgba(67,87,102,.12);
+  line-height:1.45;
+}
+.msg.assistant .bubble{
+  background:#F5F7F8; color:#2D3B44;
+  border-top-left-radius:6px;
+}
+.msg.user{ justify-content:flex-end; }
+.msg.user .bubble{
+  background:#E8EEF3; color:#0F172A;
+  border-top-right-radius:6px;
+}
+
+/* input bar inside the card */
+.chat-inputbar{
+  display:flex; gap:.6rem; padding:10px; border-top:1px solid #e7eef4; background:#fff;
+}
+.chat-inputbar .stTextInput>div>div>input{
+  background:#F5F7F8 !important;
+  border:1px solid var(--brand-accent) !important;
+}
+.chat-inputbar .stButton>button{
+  background:var(--brand-primary) !important; color:#fff !important;
+  border:1px solid var(--brand-primary) !important;
+}
+/* Header layout fixes */
+.topbar { display: block; }  /* ensure normal flow */
+
+/* Keep the tabs inside their column and allow horizontal scroll if tight */
+.topbar .stTabs { margin-bottom: 0; border-bottom: none; }
+.topbar .stTabs [role="tablist"]{
+  overflow-x: auto;           /* prevents pushing into the logout column */
+  white-space: nowrap;
+  gap: 22px;
+  scrollbar-width: none;
+}
+.topbar .stTabs [role="tablist"]::-webkit-scrollbar{ display: none; }
+
+/* Optional: reduce tab underline thickness */
+.topbar .stTabs [data-baseweb="tab-highlight"]{ height: 2px; }
+
+/* Make sure the logout column content stays right aligned and on top */
+.topbar .logout-col { display:flex; justify-content:flex-end; align-items:center; }
+            
+
+/* Footer chat dock */
+.chat-footer { height: 260px; }
+.chat-footer.collapsed{ height: 56px; } 
+
+/* Footer header bar */
+.chat-footer-head {
+  display:flex; align-items:center; justify-content:space-between;
+  gap: .75rem; padding: 8px 14px; background: #f7fafc;
+  border-bottom: 1px solid #e7eef4;
+}
+.chat-footer-head h4 { margin:0; color: var(--brand-primary); }
+
+/* Scrollable chat area */
+.chat-footer-scroll {
+  flex: 1 1 auto; overflow-y: auto; padding: 12px 16px; background:#fbfdff;
+}
+
+/* Input bar */
+.chat-footer-input {
+  flex: 0 0 auto; display:flex; gap:.5rem; padding: 10px 12px;
+  border-top: 1px solid #e7eef4; background:#fff;
+}
+.chat-footer-input .stTextInput>div>div>input{
+  background:#F5F7F8 !important;
+  border:1px solid var(--brand-accent) !important;
+}
+.chat-footer-input .stButton>button{
+  background:var(--brand-primary) !important; color:#fff !important;
+  border:1px solid var(--brand-primary) !important;
+}
+
+/* Bubbles (simple) */
+.msg{ display:flex; gap:.6rem; margin:8px 0; }
+.msg .avatar{
+  width:26px; height:26px; border-radius:50%; background:var(--brand-primary);
+  color:#fff; display:flex; align-items:center; justify-content:center; font-size:.75rem;
+}
+.msg .bubble{
+  max-width:76%; padding:10px 14px; border-radius:16px; box-shadow:0 2px 8px rgba(67,87,102,.12);
+  line-height:1.45;
+}
+.msg.assistant .bubble{ background:#F5F7F8; color:#2D3B44; border-top-left-radius:6px; }
+.msg.user{ justify-content:flex-end; }
+.msg.user .bubble{ background:#E8EEF3; color:#0F172A; border-top-right-radius:6px; }
+
+/* Collapsed state */
+.chat-footer.collapsed{ height: 56px; }
+.chat-footer.collapsed .chat-footer-scroll,
+.chat-footer.collapsed .chat-footer-input{ display:none; }
+            
+/* Hide Streamlit’s default footer/menu to avoid extra bars */
+footer { visibility: hidden; }
+[data-testid="stToolbar"] { display: none !important; }
+
+
+</style>
+""", unsafe_allow_html=True)
+
+
+# Streamlit ≥ 1.31 shows a proper header logo (top-left)
+try:
+    st.logo(str(LOGO))
+except Exception:
+    # Fallback for older versions: simple header row
+    c1, c2 = st.columns([1, 8])
+    with c1:
+        st.image(str(LOGO), use_container_width=True)
+    with c2:
+        st.markdown("### Medical Agent")
+        st.caption("AI-generated draft; requires radiologist review. Not for diagnostic use.")
 
 
 API_URL = os.getenv("MEDAGENT_API_URL", "http://127.0.0.1:8000")
@@ -66,6 +280,10 @@ def _extract_patient(meta: dict):
     )
     return name, mrn
 
+def _append_chat(role: str, content: str):
+    if "chat_history" not in st.session_state:
+        st.session_state["chat_history"] = []
+    st.session_state["chat_history"].append((role, content))
 
 
 st.set_page_config(page_title="Medical Agent • Imaging Suite", layout="wide")
@@ -96,6 +314,57 @@ st.markdown("""
 .app-subtle {margin-top:-6px; color:#666; font-size:0.90rem;}
 .userbox {font-size:.95rem;}
 .userbox .user {font-weight:700;}
+/* Top app header bar (our custom one) */
+/* Sticky top app header */
+/* Transparent, borderless header (no horizontal bar) */
+.topbar {
+  position: sticky; top: 0; z-index: 999;
+  background: transparent;     /* was var(--brand-shadow) */
+  border-bottom: none;         /* was 1px solid var(--brand-accent) */
+  padding: 4px 0;              /* reduce height */
+  margin: 0 0 8px 0;           /* remove negative margins that created a stripe */
+}
+
+
+/* Keep header widgets readable on dark */
+.topbar label, .topbar p, .topbar span, .topbar div { color: var(--brand-soft) !important; }
+
+
+/* Logout button on header */
+.topbar .stButton > button {
+  background: var(--brand-primary) !important;
+  color: #fff !important;
+  border: 1px solid var(--brand-primary) !important;
+}
+.topbar .stButton > button:hover { background: var(--brand-highlight) !important; }
+
+/* Logo sizing/alignment */
+.topbar .logo-box { display:flex; align-items:center; gap:.5rem; }
+.topbar .logo-box img { width: 120px; height:auto; } /* tweak 100–160 as you like */
+            
+/* Make the chat popover wider and nicer */
+[data-testid="stPopover"]{
+  min-width: 520px;            /* popover width */
+  border: 1px solid var(--brand-accent);
+  border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(0,0,0,.18);
+}
+.header-chat-scroll{
+  max-height: 380px;           /* scrollable history height */
+  overflow-y: auto;
+  padding: 8px 2px 0 2px;
+}
+.header-chat-inputbar .stTextInput>div>div>input{
+  background:#F5F7F8 !important;
+  border:1px solid var(--brand-accent) !important;
+}
+.header-chat-inputbar .stButton>button{
+  background:var(--brand-primary) !important;
+  color:#fff !important;
+  border:1px solid var(--brand-primary) !important;
+}
+
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -137,16 +406,8 @@ def _abs_or_static(p) -> Optional[str]:
 
 # ---------------- Login gate ----------------
 if not st.session_state.get("token"):
-    st.markdown("""
-    <div class="app-topbar">
-      <div>
-        <div class="app-title">Medical Agent</div>
-        <div class="app-subtle">AI-generated draft; requires radiologist review. Not for diagnostic use.</div>
-      </div>
-      <div></div>
-    </div>
-    """, unsafe_allow_html=True)
-    st.subheader("Login")
+    st.markdown("### Login")
+
     with st.form("login_form", clear_on_submit=False):
         u = st.text_input("Username")
         p = st.text_input("Password", type="password")
@@ -154,69 +415,6 @@ if not st.session_state.get("token"):
     if submitted and do_login(u, p):
         st.rerun()
     st.stop()
-
-# ---------------- Header (with navbar + user/Logout) ----------------
-left, mid, right = st.columns([0.5, 2.2, 1])
-with left:
-    # Single top nav
-    labels = ["Patient Registration", "Chest X-Ray Analysis", "Brain Tumour Detection"]
-    key_by_label = {
-        "Patient Registration": "patient",
-        "Chest X-Ray Analysis": "cxr",
-        "Brain Tumour Detection": "brain",
-    }
-    label_by_key = {v: k for k, v in key_by_label.items()}
-    current_idx = labels.index(label_by_key.get(st.session_state.get("page", "cxr"), "Chest X-Ray Analysis"))
-    choice = st.radio("Navigation", labels, index=current_idx, horizontal=True, label_visibility="collapsed")
-    st.session_state["page"] = key_by_label[choice]
-
-with mid:
-    with st.container(border=True):
-        st.text_input(
-            "Search reports",
-            key="nav_search_q",
-            placeholder="Search reports…",
-            label_visibility="collapsed",
-            on_change=do_nav_search,   # <-- ENTER triggers search
-        )
-
-
-with right:
-    if st.button(f"Logout ( {st.session_state.get('user','')} )", key="logout_btn", type="secondary", use_container_width=True):
-        do_logout()
-        st.rerun()
-
-# --- Search Results (from top navbar search) ---
-# --- Search Results (under navbar) ---
-if "nav_search_error" in st.session_state and st.session_state.get("nav_search_error"):
-    st.error(f"Search failed: {st.session_state['nav_search_error']}")
-
-results = st.session_state.get("nav_search_results") or []
-if results:
-    st.subheader("Search results")
-    for i, hit in enumerate(results, 1):
-        meta = hit.get("meta", {}) or {}
-        patient = meta.get("patient") or meta.get("patient_meta") or {}
-        name, mrn = _extract_patient(meta)
-        score = float(hit.get("score", 0.0))
-
-        # guess a report link
-        pdf_rel = meta.get("pdf") \
-                  or (meta.get("artifacts") or {}).get("pdf") \
-                  or (f"/static/{meta['encounter_id']}/report.pdf" if meta.get("encounter_id") else None)
-        pdf_url = _abs_or_static(pdf_rel) if pdf_rel else None
-
-        with st.container(border=True):
-            c1, c2, c3, c4 = st.columns([4, 2, 2, 2])
-            c1.markdown(f"**{i}. {name}**")
-            c2.markdown(f"**MRN:** {mrn}")
-            c3.markdown(f"**Score:** {score:.4f}")
-            if pdf_url:
-                c4.markdown(f"[Open report]({pdf_url})")
-
-    st.button("Clear results", on_click=clear_nav_search, type="secondary")
-
-        
 
 # ---------------- Common helpers ----------------
 def load_preview_from_bytes(data: bytes) -> Optional[Image.Image]:
@@ -238,9 +436,9 @@ def _abs_or_static(url_or_path: Optional[str]) -> Optional[str]:
 # ======================================================================
 # PAGE 1: PATIENT REGISTRATION  (integrated with backend)
 # ======================================================================
-if st.session_state["page"] == "patient":
+def render_patient_page():
     st.divider()
-    st.header("🧾 Patient Registration")
+    st.header("New Patient Registration")
 
     # ---------- Create patient ----------
     with st.form("patient_form"):
@@ -359,7 +557,7 @@ if st.session_state["page"] == "patient":
 # ======================================================================
 # PAGE 2: CHEST X-RAY ANALYSIS (MRN required + validated; PDF includes images)
 # ======================================================================
-elif st.session_state["page"] == "cxr":
+def render_cxr_page():
     st.divider()
     st.header("Chest X-Ray Analysis")
 
@@ -522,73 +720,14 @@ elif st.session_state["page"] == "cxr":
         except Exception as e:
             st.error(f"Could not load PDF: {e}")
     
-    # ---- Chatbot (RAG) ----
-    st.divider()
-    st.header("💬 Report Chatbot")
 
-    if "chat_history" not in st.session_state:
-        st.session_state["chat_history"] = []
-
-    # render prior messages
-    for role, content in st.session_state["chat_history"]:
-        with st.chat_message(role):
-            st.markdown(content)
-
-    prompt = st.chat_input("Ask about findings, impressions, trends…")
-    if prompt:
-        # show user message
-        st.session_state["chat_history"].append(("user", prompt))
-        with st.chat_message("user"):
-            st.markdown(prompt)
-
-        # call backend
-        try:
-            r = requests.post(
-                f"{API_URL}/chat",
-                json={"query": prompt, "k": 4},
-                headers=_auth_hdrs(),
-                cookies=_auth_cookies(),
-                timeout=60,
-            )
-            r.raise_for_status()
-            data = r.json()
-            answer = data.get("answer", "")
-            sources = data.get("sources", []) or []
-
-            # assistant msg + citations
-            with st.chat_message("assistant"):
-                st.markdown(answer)
-
-                sources = data.get("sources", []) or []
-                if sources:
-                    st.markdown("**Matches**")
-                    for s in sources:
-                        name = s.get("patient_name") or "—"
-                        mrn  = s.get("mrn") or "—"
-                        score = float(s.get("score", 0.0))
-                        pdf = _abs_or_static(s.get("pdf")) if s.get("pdf") else None
-
-                        cols = st.columns([5, 2, 2, 3])
-                        cols[0].markdown(f"**{name}**")
-                        cols[1].markdown(f"**MRN:** {mrn}")
-                        cols[2].markdown(f"**Score:** {score:.4f}")
-                        if pdf:
-                            cols[3].markdown(f"[Open report]({pdf})")
-            st.session_state["chat_history"].append(("assistant", answer))
-        except Exception as e:
-            with st.chat_message("assistant"):
-                st.error(f"Chat failed: {e}")
-
-    # clear thread
-    if st.button("Clear chat", type="secondary"):
-        st.session_state["chat_history"] = []
 
 
 
 # ======================================================================
 # PAGE 3: BRAIN TUMOUR DETECTION (placeholder; optional /brain/infer)
 # ======================================================================
-elif st.session_state["page"] == "brain":
+def render_brain_page():
     st.divider()
     st.header("Brain Tumour Detection")
 
@@ -621,3 +760,181 @@ elif st.session_state["page"] == "brain":
                 st.info("Brain inference backend not configured yet. This is a placeholder UI.")
 
     st.caption("Note: wire this page to your `/brain/infer` endpoint when available.")
+
+# ---- put these helpers near render_footer_chat() ----
+# ----- helpers used by the footer callbacks -----
+def _footer_send():
+    msg = (st.session_state.get("footer_chat_text") or "").strip()
+    if not msg:
+        return
+    st.session_state.setdefault("chat_history", []).append(("user", msg))
+    # call backend
+    try:
+        r = requests.post(
+            f"{API_URL}/chat",
+            json={"query": msg, "k": 4},
+            headers=_auth_hdrs(),
+            cookies=_auth_cookies(),
+            timeout=60,
+        )
+        r.raise_for_status()
+        data = r.json()
+        answer = data.get("answer", "")
+        st.session_state["chat_history"].append(("assistant", answer))
+
+        sources = data.get("sources", []) or []
+        if sources:
+            lines = []
+            for s in sources[:3]:
+                name = s.get("patient_name") or "—"
+                mrn  = s.get("mrn") or "—"
+                score = float(s.get("score", 0.0))
+                lines.append(f"• {name} (MRN {mrn}) — {score:.3f}")
+            st.session_state["chat_history"].append(("assistant", "**Matches**  \n" + "\n".join(lines)))
+    except Exception as e:
+        st.session_state["chat_history"].append(("assistant", f"⚠️ Chat failed: {e}"))
+
+    # safe to clear inside callback
+    st.session_state.footer_chat_text = ""
+
+def _footer_clear():
+    st.session_state["chat_history"] = []
+    st.session_state["footer_chat_text"] = ""
+
+
+def render_footer_chat():
+    # init state
+    st.session_state.setdefault("chat_history", [])
+    st.session_state.setdefault("chat_open", True)
+    st.session_state.setdefault("footer_chat_text", "")
+
+    # dynamic bottom padding so content isn't hidden under fixed footer
+    pad_px = 260 if st.session_state["chat_open"] else 56
+    st.markdown(f"<style>.page-bottom-pad{{padding-bottom:{pad_px}px}}</style>", unsafe_allow_html=True)
+    st.markdown('<div class="page-bottom-pad"></div>', unsafe_allow_html=True)
+
+    # footer outer
+    collapsed_cls = " collapsed" if not st.session_state["chat_open"] else ""
+    st.markdown(f'<div class="chat-footer{collapsed_cls}">', unsafe_allow_html=True)
+
+    # header row with toggle
+    head_l, head_r = st.columns([6, 2])
+    with head_l:
+        st.markdown('<div class="chat-footer-head"><h4>💬 Report Chatbot</h4></div>', unsafe_allow_html=True)
+    with head_r:
+        if st.button("Hide" if st.session_state["chat_open"] else "Show",
+                     key="chat_toggle", use_container_width=True):
+            st.session_state["chat_open"] = not st.session_state["chat_open"]
+            st.rerun()
+
+    if st.session_state["chat_open"]:
+        # history
+        st.markdown('<div class="chat-footer-scroll">', unsafe_allow_html=True)
+        if st.session_state["chat_history"]:
+            for role, content in st.session_state["chat_history"]:
+                role = role if role in ("user", "assistant") else "assistant"
+                av = "U" if role == "user" else "AI"
+                html = f'''
+                <div class="msg {'user' if role=='user' else 'assistant'}">
+                  <div class="avatar">{av}</div>
+                  <div class="bubble">{content}</div>
+                </div>'''
+                st.markdown(html, unsafe_allow_html=True)
+        else:
+            st.markdown(
+                '<div class="msg assistant"><div class="avatar">AI</div>'
+                '<div class="bubble">Hi! Ask about findings, impressions, or trends.</div></div>',
+                unsafe_allow_html=True
+            )
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        # input bar (callbacks handle actions)
+        st.markdown('<div class="chat-footer-input">', unsafe_allow_html=True)
+        col_in, col_send, col_clear = st.columns([8, 1.2, 1.2])
+        with col_in:
+            st.text_input(
+                "Type a message…",
+                key="footer_chat_text",
+                label_visibility="collapsed",
+                placeholder="Type a message…",
+            )
+        with col_send:
+            st.button("Send", use_container_width=True, key="footer_chat_send", on_click=_footer_send)
+        with col_clear:
+            st.button("Clear", type="secondary", use_container_width=True, key="footer_chat_clear", on_click=_footer_clear)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('</div>', unsafe_allow_html=True)  # end .chat-footer
+
+
+
+
+# ---------------- Top Header Bar (sticky with logo + TABS + logout) ----------------
+# ---------------- Top Header Bar (logo + tabs + CHAT + logout) ----------------
+st.markdown('<div class="topbar">', unsafe_allow_html=True)
+
+c_logo, c_tabs, c_logout = st.columns([1.1, 8.2, 1.5])
+
+with c_logo:
+    st.image(str(LOGO), use_container_width=False, width=120)
+
+with c_tabs:
+    tab_patient, tab_cxr, tab_brain = st.tabs(
+        ["Patient Registry", "Chest X-Ray Analysis", "Brain Tumour Detection"]
+    )
+
+with c_logout:
+    # ensure right alignment via CSS class
+    st.markdown('<div class="logout-col">', unsafe_allow_html=True)
+    user_lbl = st.session_state.get("user", "")
+    if st.button(f"Logout ( {user_lbl} )", type="primary", use_container_width=True, key="logout_btn"):
+        do_logout(); st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
+
+st.markdown('</div>', unsafe_allow_html=True)
+
+# ---- Render tab contents below ----
+with tab_patient: render_patient_page()
+with tab_cxr:     render_cxr_page()
+with tab_brain:   render_brain_page()
+render_footer_chat()
+
+
+
+
+
+# --- Search Results (from top navbar search) ---
+# --- Search Results (under navbar) ---
+if "nav_search_error" in st.session_state and st.session_state.get("nav_search_error"):
+    st.error(f"Search failed: {st.session_state['nav_search_error']}")
+
+results = st.session_state.get("nav_search_results") or []
+if results:
+    st.subheader("Search results")
+    for i, hit in enumerate(results, 1):
+        meta = hit.get("meta", {}) or {}
+        patient = meta.get("patient") or meta.get("patient_meta") or {}
+        name, mrn = _extract_patient(meta)
+        score = float(hit.get("score", 0.0))
+
+        # guess a report link
+        pdf_rel = meta.get("pdf") \
+                  or (meta.get("artifacts") or {}).get("pdf") \
+                  or (f"/static/{meta['encounter_id']}/report.pdf" if meta.get("encounter_id") else None)
+        pdf_url = _abs_or_static(pdf_rel) if pdf_rel else None
+
+        with st.container(border=True):
+            c1, c2, c3, c4 = st.columns([4, 2, 2, 2])
+            c1.markdown(f"**{i}. {name}**")
+            c2.markdown(f"**MRN:** {mrn}")
+            c3.markdown(f"**Score:** {score:.4f}")
+            if pdf_url:
+                c4.markdown(f"[Open report]({pdf_url})")
+
+    st.button("Clear results", on_click=clear_nav_search, type="secondary")
+
+        
+
+
+
+
