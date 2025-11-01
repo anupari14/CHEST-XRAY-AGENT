@@ -625,9 +625,11 @@ function CXRPage({ headers }) {
               Upload a chest X-ray above to preview.
             </div>
           )}
+
         </div>
 
         <ImageCarousel items={cams} matchRef={inputImgBoxRef} title="AI Findings" />
+        
           {/* <h3 style={{ margin: 0, fontSize: '1.05rem' }}>AI Findings</h3>
           {cams?.length ? (
             <div
@@ -654,7 +656,11 @@ function CXRPage({ headers }) {
             <div className="subtle" style={{ marginTop: 8, minHeight: 320, display: 'flex', alignItems: 'center' }}>
               No overlays for this analysis.
             </div>
-          )} */}
+          )} */
+         
+          }
+          
+
         </div>
 
       {/* Report */}

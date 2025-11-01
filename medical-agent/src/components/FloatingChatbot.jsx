@@ -143,13 +143,13 @@ export default function FloatingChatbot({
             </div>
 
             {/* Quick prompts */}
-            <div className="chat-prompts">
+            {/* <div className="chat-prompts">
               {quickPrompts.map((p, i) => (
                 <button key={i} onClick={() => sendPrompt(p)} className="btn chat-chip">
                   {p}
                 </button>
               ))}
-            </div>
+            </div> */}
 
             {/* Messages */}
             <div ref={listRef} className="chat-body">
